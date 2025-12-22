@@ -43,7 +43,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       }, { status: 400 })
     }
 
-    // Format keywords data for the prompt
+    // Format keywords data for the prompt - process all at once
     const keywordsData = keywords.map(kw =>
       `${kw.keyword},${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex}`
     ).join('\n')
@@ -60,39 +60,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       KEYWORDS_DATA: formattedKeywords
     })
 
-    // Process keywords in batches
-    // Gemini Flash can handle 200 keywords per batch reliably
-    // This reduces 996 keywords from 20 batches to just 5 batches
-    const BATCH_SIZE = 200
-    const keywordBatches: KeywordIdea[][] = []
-    for (let i = 0; i < keywords.length; i += BATCH_SIZE) {
-      keywordBatches.push(keywords.slice(i, i + BATCH_SIZE))
-    }
+    console.log('[ANALYZE] Processing all', keywords.length, 'keywords in a single request')
 
-    console.log('[ANALYZE] Processing', keywords.length, 'keywords in', keywordBatches.length, 'batches')
-
-    const allAnalyzedKeywords: AnalyzedKeyword[] = []
-
-    // Process batches in parallel (3 at a time for speed while avoiding rate limits)
-    const PARALLEL_BATCHES = 3
-
-    const processBatch = async (batch: KeywordIdea[], batchIndex: number, retryCount = 0): Promise<AnalyzedKeyword[]> => {
+    // Analyze all keywords in a single API call
+    const analyzeAllKeywords = async (retryCount = 0): Promise<AnalyzedKeyword[]> => {
       const MAX_RETRIES = 2
-      console.log('[ANALYZE] Processing batch', batchIndex + 1, 'of', keywordBatches.length, '(', batch.length, 'keywords)', retryCount > 0 ? `[Retry ${retryCount}]` : '')
-
-      const batchKeywordsData = batch.map(kw =>
-        `${kw.keyword},${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex}`
-      ).join('\n')
-      const batchKeywordsHeader = 'Keyword,Avg Monthly Searches,Competition,Competition Index'
-      const batchFormattedKeywords = `${batchKeywordsHeader}\n${batchKeywordsData}`
-
-      const batchFilledPrompt = fillPromptVariables(prompt, {
-        COURSE_NAME: courseName,
-        CERTIFICATION_CODE: certificationCode || 'N/A',
-        VENDOR: vendor || 'Not specified',
-        RELATED_TERMS: relatedTerms || courseName,
-        KEYWORDS_DATA: batchFormattedKeywords
-      })
+      console.log('[ANALYZE] Sending request to AI...', retryCount > 0 ? `[Retry ${retryCount}]` : '')
 
       try {
         const result = await aiClient.chatCompletionWithFallback(
@@ -131,31 +104,31 @@ Each keyword in analyzedKeywords should have these fields:
 - exclusionReason (string, only if excluded)
 - priority (string with emoji: "🔴 URGENT" | "🟠 HIGH" | "🟡 MEDIUM" | "⚪ STANDARD" | "🔵 REVIEW", only for ADD action)
 
-IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. Analyze ALL ${batch.length} keywords provided.`
+IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. Analyze ALL ${keywords.length} keywords provided.`
               },
               {
                 role: 'user',
-                content: batchFilledPrompt
+                content: filledPrompt
               }
             ],
             temperature: 0.3,
-            maxTokens: 16000,
+            maxTokens: 65000, // Increased for larger responses
             jsonMode: true
           },
           { provider: aiProvider }
         )
 
         const responseText = result.content
-        console.log('[ANALYZE] Batch', batchIndex + 1, 'response from', result.provider, '(', result.model, ')')
-        console.log('[ANALYZE] Batch', batchIndex + 1, 'response length:', responseText.length, 'chars')
-        console.log('[ANALYZE] Batch', batchIndex + 1, 'tokens used:', result.tokensUsed)
+        console.log('[ANALYZE] Response from', result.provider, '(', result.model, ')')
+        console.log('[ANALYZE] Response length:', responseText.length, 'chars')
+        console.log('[ANALYZE] Tokens used:', result.tokensUsed)
 
-        const batchResult = JSON.parse(responseText)
-        console.log('[ANALYZE] Batch', batchIndex + 1, 'parsed successfully,', batchResult.analyzedKeywords?.length || 0, 'keywords')
+        const analysisResult = JSON.parse(responseText)
+        console.log('[ANALYZE] Parsed successfully,', analysisResult.analyzedKeywords?.length || 0, 'keywords')
 
-        if (batchResult.analyzedKeywords && Array.isArray(batchResult.analyzedKeywords)) {
-          return batchResult.analyzedKeywords.map((analyzed: Partial<AnalyzedKeyword>) => {
-            const original = batch.find(k =>
+        if (analysisResult.analyzedKeywords && Array.isArray(analysisResult.analyzedKeywords)) {
+          return analysisResult.analyzedKeywords.map((analyzed: Partial<AnalyzedKeyword>) => {
+            const original = keywords.find(k =>
               k.keyword.toLowerCase() === analyzed.keyword?.toLowerCase()
             )
             return {
@@ -165,6 +138,7 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. A
               competitionIndex: original?.competitionIndex || analyzed.competitionIndex || 0,
               lowTopOfPageBidMicros: original?.lowTopOfPageBidMicros,
               highTopOfPageBidMicros: original?.highTopOfPageBidMicros,
+              inAccount: original?.inAccount,
               courseRelevance: analyzed.courseRelevance || 0,
               relevanceStatus: analyzed.relevanceStatus || 'NOT_RELEVANT',
               conversionPotential: analyzed.conversionPotential || 0,
@@ -188,29 +162,21 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. A
         }
         return []
       } catch (error) {
-        console.error('[ANALYZE] Batch', batchIndex + 1, 'error:', error)
+        console.error('[ANALYZE] Error:', error)
 
         // Retry on failure
         if (retryCount < MAX_RETRIES) {
-          console.log('[ANALYZE] Retrying batch', batchIndex + 1, 'in 2 seconds...')
+          console.log('[ANALYZE] Retrying in 2 seconds...')
           await new Promise(resolve => setTimeout(resolve, 2000))
-          return processBatch(batch, batchIndex, retryCount + 1)
+          return analyzeAllKeywords(retryCount + 1)
         }
 
-        console.error('[ANALYZE] Batch', batchIndex + 1, 'failed after', MAX_RETRIES, 'retries')
-        return []
+        console.error('[ANALYZE] Failed after', MAX_RETRIES, 'retries')
+        throw error
       }
     }
 
-    // Process batches in parallel chunks
-    for (let i = 0; i < keywordBatches.length; i += PARALLEL_BATCHES) {
-      const batchChunk = keywordBatches.slice(i, i + PARALLEL_BATCHES)
-      const results = await Promise.all(
-        batchChunk.map((batch, idx) => processBatch(batch, i + idx))
-      )
-      results.forEach(result => allAnalyzedKeywords.push(...result))
-      console.log('[ANALYZE] Completed parallel chunk', Math.floor(i / PARALLEL_BATCHES) + 1)
-    }
+    const allAnalyzedKeywords = await analyzeAllKeywords()
 
     // If no keywords were analyzed, return error
     if (allAnalyzedKeywords.length === 0) {
@@ -233,7 +199,7 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. A
       highPriorityCount: allAnalyzedKeywords.filter(k => k.priority === '🟠 HIGH').length
     }
 
-    console.log(`Analyzed ${allAnalyzedKeywords.length} keywords in ${keywordBatches.length} batch(es)`)
+    console.log(`[ANALYZE] Complete: ${allAnalyzedKeywords.length} keywords analyzed`)
 
     return NextResponse.json({
       success: true,

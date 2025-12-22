@@ -365,23 +365,8 @@ export default function Home() {
 
       // ========== STEP 5: Analyze Keywords ==========
       const totalKeywords = keywordsResult.data.length
-      const batchSize = 50
-      const totalBatches = Math.ceil(totalKeywords / batchSize)
 
-      updateProgress('analyze', 'in_progress', `Starting analysis of ${totalKeywords} keywords in ${totalBatches} batch(es)...`, 5)
-
-      // Update analysis progress info
-      progress = {
-        ...progress,
-        analysisProgress: {
-          currentBatch: 0,
-          totalBatches,
-          analyzedCount: 0,
-          totalKeywords
-        }
-      }
-      updatedItem = { ...updatedItem, progress }
-      setBatchItems(prev => prev.map(i => i.id === item.id ? updatedItem : i))
+      updateProgress('analyze', 'in_progress', `Analyzing ${totalKeywords} keywords with AI...`, 5)
 
       console.log(`[STEP 3] Analyzing ${totalKeywords} keywords for: ${item.courseInput.courseName}`)
 
@@ -1641,28 +1626,11 @@ export default function Home() {
                               )}
                             </div>
 
-                            {/* Analysis Progress Bar (for analyze step) */}
-                            {step.id === 'analyze' && step.status === 'in_progress' && selectedItem.progress?.analysisProgress && (
+                            {/* Analysis Progress Indicator (for analyze step) */}
+                            {step.id === 'analyze' && step.status === 'in_progress' && (
                               <div className="mt-3 pt-3 border-t border-[var(--border-subtle)]">
-                                <div className="flex items-center justify-between text-xs mb-2">
-                                  <span className="text-[var(--text-muted)]">
-                                    Analyzing {selectedItem.progress.analysisProgress.totalKeywords} keywords
-                                  </span>
-                                  <span className="text-[var(--accent-electric)] font-mono">
-                                    {selectedItem.progress.analysisProgress.totalBatches > 1
-                                      ? `Batch ${selectedItem.progress.analysisProgress.currentBatch || 1}/${selectedItem.progress.analysisProgress.totalBatches}`
-                                      : 'Processing...'}
-                                  </span>
-                                </div>
                                 <div className="h-1.5 bg-[var(--bg-tertiary)] rounded-full overflow-hidden">
-                                  <div
-                                    className="h-full bg-gradient-to-r from-[var(--accent-electric)] to-[var(--accent-violet)] rounded-full animate-pulse"
-                                    style={{
-                                      width: selectedItem.progress.analysisProgress.totalBatches > 0
-                                        ? `${((selectedItem.progress.analysisProgress.currentBatch || 0) / selectedItem.progress.analysisProgress.totalBatches) * 100}%`
-                                        : '100%'
-                                    }}
-                                  />
+                                  <div className="h-full w-full bg-gradient-to-r from-[var(--accent-electric)] to-[var(--accent-violet)] rounded-full animate-pulse" />
                                 </div>
                               </div>
                             )}
