@@ -25,10 +25,11 @@ interface AnalysisResponse {
   }
 }
 
-// Max keywords per batch (to stay within token limits)
-// Reduced to 30 keywords - each keyword generates ~800 chars of JSON output
-// 30 keywords × 800 chars = ~24,000 chars which stays well within token limits
-const MAX_KEYWORDS_PER_BATCH = 30
+// Process ALL keywords in a single batch - using large context models via OpenRouter
+// Claude Sonnet 4: 200K context, 64K output tokens
+// Gemini Pro: 1M context, 65K output tokens
+// Process all at once for faster turnaround
+const MAX_KEYWORDS_PER_BATCH = 1000 // Effectively unlimited
 
 /**
  * Extract complete JSON objects from a potentially truncated array
@@ -188,14 +189,51 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
               messages: [
                 {
                   role: 'system',
-                  content: `You are a Google Ads keyword strategist for Koenig Solutions. Output ONLY minified JSON (no whitespace/newlines in output).
+                  content: `You are a Google Ads keyword strategist for Koenig Solutions, analyzing keywords for IT training courses.
 
-Return: {"analyzedKeywords":[...]}
+Output your analysis as a valid JSON object with this exact structure:
+{
+  "analyzedKeywords": [
+    {
+      "keyword": "...",
+      "avgMonthlySearches": number,
+      "competition": "LOW|MEDIUM|HIGH|UNSPECIFIED",
+      "competitionIndex": number,
+      "courseRelevance": number (0-10),
+      "relevanceStatus": "EXACT_MATCH|DIRECT_RELATED|STRONGLY_RELATED|RELATED|LOOSELY_RELATED|TANGENTIAL|WEAK_CONNECTION|DIFFERENT_PRODUCT|DIFFERENT_VENDOR|NOT_RELEVANT",
+      "conversionPotential": number (0-10),
+      "searchIntent": number (0-10),
+      "vendorSpecificity": number (0-10),
+      "keywordSpecificity": number (0-10),
+      "actionWordStrength": number (0-10),
+      "commercialSignals": number (0-10),
+      "negativeSignals": number (0-10),
+      "koenigFit": number (0-10),
+      "baseScore": number (0-100),
+      "competitionBonus": number (10 for Low, 5 for Medium, 0 for High),
+      "finalScore": number (0-100),
+      "tier": "Tier 1|Tier 2|Tier 3|Tier 4|Review|Exclude",
+      "matchType": "[EXACT]|PHRASE|BROAD|N/A",
+      "action": "ADD|BOOST|MONITOR|OPTIMIZE|REVIEW|EXCLUDE|EXCLUDE_RELEVANCE",
+      "exclusionReason": "..." (only if action is EXCLUDE or EXCLUDE_RELEVANCE),
+      "priority": "🔴 URGENT|🟠 HIGH|🟡 MEDIUM|⚪ STANDARD|🔵 REVIEW" (only for ADD action)
+    }
+  ],
+  "summary": {
+    "totalAnalyzed": number,
+    "toAdd": number,
+    "toReview": number,
+    "excluded": number,
+    "urgentCount": number,
+    "highPriorityCount": number
+  }
+}
 
-Each keyword object fields (use short keys to reduce output size):
-keyword, avgMonthlySearches, competition (LOW/MEDIUM/HIGH/UNSPECIFIED), competitionIndex (0-100), courseRelevance (0-10), relevanceStatus (EXACT_MATCH/DIRECT_RELATED/STRONGLY_RELATED/RELATED/LOOSELY_RELATED/TANGENTIAL/WEAK_CONNECTION/DIFFERENT_PRODUCT/DIFFERENT_VENDOR/NOT_RELEVANT), conversionPotential (0-10), searchIntent (0-10), vendorSpecificity (0-10), keywordSpecificity (0-10), actionWordStrength (0-10), commercialSignals (0-10), negativeSignals (0-10), koenigFit (0-10), baseScore (0-100), competitionBonus (10/5/0), finalScore (0-100), tier (Tier 1/Tier 2/Tier 3/Tier 4/Review/Exclude), matchType ([EXACT]/PHRASE/BROAD/N/A), action (ADD/BOOST/MONITOR/OPTIMIZE/REVIEW/EXCLUDE/EXCLUDE_RELEVANCE), exclusionReason (only if excluded), priority (🔴 URGENT/🟠 HIGH/🟡 MEDIUM/⚪ STANDARD/🔵 REVIEW, only for ADD)
-
-CRITICAL: Output minified JSON only. No markdown. No code blocks. Analyze ALL ${batchKeywords.length} keywords.`
+IMPORTANT INSTRUCTIONS:
+1. Return ONLY the JSON object - no markdown formatting, no code blocks, no explanations
+2. Analyze ALL ${batchKeywords.length} keywords provided - do not skip any
+3. Ensure the JSON is valid and complete
+4. Include the summary object with accurate counts`
                 },
                 {
                   role: 'user',
@@ -203,7 +241,7 @@ CRITICAL: Output minified JSON only. No markdown. No code blocks. Analyze ALL ${
                 }
               ],
               temperature: 0.3,
-              maxTokens: 8192, // Safe limit for most models (Gemini Flash, GPT-4o)
+              maxTokens: 32000, // Large output for detailed analysis - Claude Sonnet 4 supports up to 64K
               jsonMode: true
             },
             { provider: aiProvider }

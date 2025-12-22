@@ -31,11 +31,15 @@ export interface ChatCompletionResult {
   model: string
 }
 
-// OpenRouter models (mini/efficient models for cost-effectiveness)
+// OpenRouter models - organized by context window size
 const OPENROUTER_MODELS = {
-  // Fast & cheap mini models
+  // Large context models (for keyword analysis - need high output tokens)
+  default: 'anthropic/claude-sonnet-4', // 200K context, excellent JSON output
+  claude_sonnet: 'anthropic/claude-sonnet-4',
+  gemini_pro: 'google/gemini-2.5-pro-preview-06-05', // 1M context
+  gpt4o: 'openai/gpt-4o', // 128K context
+  // Fast & cheap mini models (for smaller tasks)
   mini: 'google/gemini-2.0-flash-001',
-  // Alternative mini models
   claude_haiku: 'anthropic/claude-3-haiku',
   gpt4o_mini: 'openai/gpt-4o-mini',
   gemini_flash: 'google/gemini-2.0-flash-001',
@@ -50,7 +54,7 @@ const OPENAI_MODELS = {
 // Default model selection based on provider
 const DEFAULT_MODELS: Record<AIProvider, string> = {
   openai: OPENAI_MODELS.default,
-  openrouter: OPENROUTER_MODELS.mini, // Use Gemini Flash as default for OpenRouter
+  openrouter: OPENROUTER_MODELS.default, // Use Claude Sonnet 4 for high quality output
 }
 
 class AIClient {
