@@ -202,7 +202,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                 }
               ],
               temperature: 0.3,
-              maxTokens: 16000, // Gemini 3 Flash supports up to 16384 output tokens
+              maxTokens: 32000, // GPT-5 Mini supports up to 128K output tokens
               jsonMode: true
             },
             { provider: aiProvider }

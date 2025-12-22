@@ -33,20 +33,22 @@ export interface ChatCompletionResult {
 
 // OpenRouter models - latest models with large context windows (Dec 2025)
 const OPENROUTER_MODELS = {
-  // Default: Gemini 3 Flash - 1M context, 16K output, frontier performance at Flash speed
-  default: 'google/gemini-3-flash-preview',
-  // Latest Gemini models (Dec 2025)
-  gemini_3_flash: 'google/gemini-3-flash-preview', // 1M context, 16K output, $0.50/M in, $3/M out
-  gemini_25_flash: 'google/gemini-2.5-flash', // 1M context, $0.30/M input, $2.50/M output
-  gemini_pro: 'google/gemini-2.5-pro', // 1M context, best quality
-  // Latest OpenAI models
-  gpt5_mini: 'openai/gpt-5-mini', // 400K context, $0.25/M input, $2/M output
+  // Default: GPT-5 Mini - 400K context, 128K output, fast and cheap
+  default: 'openai/gpt-5-mini',
+  // OpenAI models (best for JSON output)
+  gpt5_mini: 'openai/gpt-5-mini', // 400K context, 128K output, $0.25/M in, $2/M out - BEST VALUE
   o4_mini: 'openai/o4-mini', // 200K context, reasoning model
   gpt4o: 'openai/gpt-4o', // 128K context
   gpt4o_mini: 'openai/gpt-4o-mini', // 128K context
-  // Claude models (if needed)
-  claude_sonnet: 'anthropic/claude-sonnet-4',
+  // Gemini models
+  gemini_3_flash: 'google/gemini-3-flash-preview', // 1M context, 16K output
+  gemini_25_flash: 'google/gemini-2.5-flash', // 1M context
+  gemini_pro: 'google/gemini-2.5-pro', // 1M context, 65K output
+  // Claude models
+  claude_sonnet: 'anthropic/claude-sonnet-4', // 1M context, 64K output
   claude_haiku: 'anthropic/claude-3-haiku',
+  // Auto router - let OpenRouter pick the best model
+  auto: 'openrouter/auto',
 } as const
 
 // OpenAI direct models
@@ -59,7 +61,7 @@ const OPENAI_MODELS = {
 // Default model selection based on provider
 const DEFAULT_MODELS: Record<AIProvider, string> = {
   openai: OPENAI_MODELS.default, // gpt-4o-mini
-  openrouter: OPENROUTER_MODELS.default, // gemini-3-flash-preview (1M context, 65K output)
+  openrouter: OPENROUTER_MODELS.default, // gpt-5-mini (400K context, 128K output, fast)
 }
 
 class AIClient {
