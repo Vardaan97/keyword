@@ -202,7 +202,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                 }
               ],
               temperature: 0.3,
-              maxTokens: 32000, // Large output for detailed analysis - Claude Sonnet 4 supports up to 64K
+              maxTokens: 16000, // Gemini 3 Flash supports up to 16384 output tokens
               jsonMode: true
             },
             { provider: aiProvider }

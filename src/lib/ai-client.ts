@@ -33,10 +33,10 @@ export interface ChatCompletionResult {
 
 // OpenRouter models - latest models with large context windows (Dec 2025)
 const OPENROUTER_MODELS = {
-  // Default: Gemini 3 Flash - 1M context, 65K output, frontier performance at Flash speed
+  // Default: Gemini 3 Flash - 1M context, 16K output, frontier performance at Flash speed
   default: 'google/gemini-3-flash-preview',
   // Latest Gemini models (Dec 2025)
-  gemini_3_flash: 'google/gemini-3-flash-preview', // 1M context, 65K output, $0.50/M in, $3/M out
+  gemini_3_flash: 'google/gemini-3-flash-preview', // 1M context, 16K output, $0.50/M in, $3/M out
   gemini_25_flash: 'google/gemini-2.5-flash', // 1M context, $0.30/M input, $2.50/M output
   gemini_pro: 'google/gemini-2.5-pro', // 1M context, best quality
   // Latest OpenAI models
