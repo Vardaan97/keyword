@@ -1,39 +1,41 @@
+/**
+ * MongoDB Client for Keyword Planner
+ * Used as an alternative/backup to Supabase
+ */
+
 import { MongoClient, Db, Collection, ObjectId } from 'mongodb'
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017'
+const MONGODB_URI = process.env.MONGODB_URI || ''
 const DB_NAME = 'keyword_planner'
 
-// Connection cache
-let cachedClient: MongoClient | null = null
-let cachedDb: Db | null = null
+let client: MongoClient | null = null
+let db: Db | null = null
 
-export async function connectToDatabase(): Promise<{ client: MongoClient; db: Db }> {
-  if (cachedClient && cachedDb) {
-    return { client: cachedClient, db: cachedDb }
+// Check if MongoDB is configured
+export function isMongoConfigured(): boolean {
+  return !!MONGODB_URI
+}
+
+async function getDb(): Promise<Db | null> {
+  if (!MONGODB_URI) {
+    return null
   }
 
-  const client = await MongoClient.connect(MONGODB_URI)
-  const db = client.db(DB_NAME)
+  if (db) return db
 
-  cachedClient = client
-  cachedDb = db
-
-  console.log('[MONGODB] Connected to database:', DB_NAME)
-  return { client, db }
+  try {
+    client = new MongoClient(MONGODB_URI)
+    await client.connect()
+    db = client.db(DB_NAME)
+    console.log('[MONGODB] Connected successfully')
+    return db
+  } catch (error) {
+    console.error('[MONGODB] Connection failed:', error)
+    return null
+  }
 }
 
-// Types for stored data
-export interface StoredKeywordCache {
-  _id?: ObjectId
-  cacheKey: string // Hash of seeds + geoTarget + source
-  seedKeywords: string[]
-  geoTarget: string
-  source: string
-  keywords: KeywordData[]
-  createdAt: Date
-  expiresAt: Date // 48 hours from creation
-}
-
+// Type for stored keyword data
 export interface KeywordData {
   keyword: string
   avgMonthlySearches: number
@@ -43,15 +45,50 @@ export interface KeywordData {
   highTopOfPageBidMicros?: number
 }
 
+// Type for cache entries
+interface CacheEntry {
+  _id?: ObjectId
+  cacheKey: string
+  keywords: KeywordData[]
+  geoTarget: string
+  source: string
+  createdAt: Date
+  expiresAt: Date
+}
+
+// Type for stored analysis
 export interface StoredAnalysis {
   _id?: ObjectId
   courseId: string
   courseName: string
   courseUrl: string
   vendor?: string
-  seedKeywords: SeedKeywordData[]
+  seedKeywords: { keyword: string; source: string }[]
   rawKeywords: KeywordData[]
-  analyzedKeywords: AnalyzedKeywordData[]
+  analyzedKeywords: {
+    keyword: string
+    avgMonthlySearches: number
+    competition: string
+    competitionIndex: number
+    courseRelevance: number
+    relevanceStatus: string
+    conversionPotential: number
+    searchIntent: number
+    vendorSpecificity: number
+    keywordSpecificity: number
+    actionWordStrength: number
+    commercialSignals: number
+    negativeSignals: number
+    koenigFit: number
+    baseScore: number
+    competitionBonus: number
+    finalScore: number
+    tier: string
+    matchType: string
+    action: string
+    exclusionReason?: string
+    priority?: string
+  }[]
   dataSource: string
   geoTarget: string
   processingTimeMs: number
@@ -59,196 +96,143 @@ export interface StoredAnalysis {
   updatedAt: Date
 }
 
-export interface SeedKeywordData {
-  keyword: string
-  source: string
-}
-
-export interface AnalyzedKeywordData {
-  keyword: string
-  avgMonthlySearches: number
-  competition: string
-  competitionIndex: number
-  lowTopOfPageBidMicros?: number
-  highTopOfPageBidMicros?: number
-  courseRelevance: number
-  relevanceStatus: string
-  conversionPotential: number
-  searchIntent: number
-  vendorSpecificity: number
-  keywordSpecificity: number
-  actionWordStrength: number
-  commercialSignals: number
-  negativeSignals: number
-  koenigFit: number
-  baseScore: number
-  competitionBonus: number
-  finalScore: number
-  tier: string
-  matchType: string
-  action: string
-  exclusionReason?: string
-  priority?: string
-  selected?: boolean // User selection state
-}
-
-export interface StoredSession {
-  _id?: ObjectId
-  sessionId: string
-  analyses: string[] // Array of analysis IDs
-  createdAt: Date
-  updatedAt: Date
-}
-
-// Helper functions
-export function generateCacheKey(seeds: string[], geoTarget: string, source: string): string {
-  const sortedSeeds = [...seeds].sort().join('|')
-  return `${sortedSeeds}__${geoTarget}__${source}`
-}
-
-// Cache expiry: 48 hours
-const CACHE_DURATION_MS = 48 * 60 * 60 * 1000
-
-export async function getCachedKeywords(
-  seeds: string[],
+// Cache functions
+export async function getCachedKeywordsMongo(
+  seedKeywords: string[],
   geoTarget: string,
   source: string
 ): Promise<KeywordData[] | null> {
-  try {
-    const { db } = await connectToDatabase()
-    const collection = db.collection<StoredKeywordCache>('keyword_cache')
+  const database = await getDb()
+  if (!database) return null
 
-    const cacheKey = generateCacheKey(seeds, geoTarget, source)
+  try {
+    const collection: Collection<CacheEntry> = database.collection('keyword_cache')
+    const cacheKey = `${seedKeywords.sort().join(',')}_${geoTarget}_${source}`
+
     const cached = await collection.findOne({
       cacheKey,
       expiresAt: { $gt: new Date() }
     })
 
     if (cached) {
-      console.log('[CACHE] Hit for', seeds.length, 'seeds,', geoTarget, source)
+      console.log('[MONGODB] Cache hit for:', cacheKey.substring(0, 50) + '...')
       return cached.keywords
     }
-
-    console.log('[CACHE] Miss for', seeds.length, 'seeds,', geoTarget, source)
     return null
   } catch (error) {
-    console.error('[CACHE] Error getting cached keywords:', error)
+    console.error('[MONGODB] Cache fetch error:', error)
     return null
   }
 }
 
-export async function setCachedKeywords(
-  seeds: string[],
+export async function setCachedKeywordsMongo(
+  seedKeywords: string[],
   geoTarget: string,
   source: string,
-  keywords: KeywordData[]
+  keywords: KeywordData[],
+  ttlHours = 48
 ): Promise<void> {
-  try {
-    const { db } = await connectToDatabase()
-    const collection = db.collection<StoredKeywordCache>('keyword_cache')
+  const database = await getDb()
+  if (!database) return
 
-    const cacheKey = generateCacheKey(seeds, geoTarget, source)
-    const now = new Date()
+  try {
+    const collection: Collection<CacheEntry> = database.collection('keyword_cache')
+    const cacheKey = `${seedKeywords.sort().join(',')}_${geoTarget}_${source}`
 
     await collection.updateOne(
       { cacheKey },
       {
         $set: {
-          seedKeywords: seeds,
+          cacheKey,
+          keywords,
           geoTarget,
           source,
-          keywords,
-          createdAt: now,
-          expiresAt: new Date(now.getTime() + CACHE_DURATION_MS)
+          createdAt: new Date(),
+          expiresAt: new Date(Date.now() + ttlHours * 60 * 60 * 1000)
         }
       },
       { upsert: true }
     )
-
-    console.log('[CACHE] Stored', keywords.length, 'keywords for', seeds.length, 'seeds')
+    console.log('[MONGODB] Cached keywords for:', cacheKey.substring(0, 50) + '...')
   } catch (error) {
-    console.error('[CACHE] Error caching keywords:', error)
+    console.error('[MONGODB] Cache set error:', error)
   }
 }
 
-export async function saveAnalysis(analysis: Omit<StoredAnalysis, '_id'>): Promise<string | null> {
-  try {
-    const { db } = await connectToDatabase()
-    const collection = db.collection<StoredAnalysis>('analyses')
+// Analysis storage functions
+export async function saveAnalysisMongo(analysis: Omit<StoredAnalysis, '_id'>): Promise<string | null> {
+  const database = await getDb()
+  if (!database) return null
 
-    const result = await collection.insertOne(analysis as StoredAnalysis)
-    console.log('[DB] Saved analysis for:', analysis.courseName)
-    return result.insertedId.toString()
+  try {
+    const collection: Collection<StoredAnalysis> = database.collection('analyses')
+
+    // Check if analysis exists for this course
+    const existing = await collection.findOne({ courseId: analysis.courseId })
+
+    if (existing) {
+      await collection.updateOne(
+        { courseId: analysis.courseId },
+        { $set: { ...analysis, updatedAt: new Date() } }
+      )
+      console.log('[MONGODB] Updated analysis for:', analysis.courseName)
+      return existing._id?.toString() || null
+    } else {
+      const result = await collection.insertOne(analysis as StoredAnalysis)
+      console.log('[MONGODB] Saved new analysis for:', analysis.courseName)
+      return result.insertedId.toString()
+    }
   } catch (error) {
-    console.error('[DB] Error saving analysis:', error)
+    console.error('[MONGODB] Save analysis error:', error)
     return null
   }
 }
 
-export async function getAnalysis(courseId: string): Promise<StoredAnalysis | null> {
+export async function getRecentAnalysesMongo(limit = 50): Promise<StoredAnalysis[]> {
+  const database = await getDb()
+  if (!database) return []
+
   try {
-    const { db } = await connectToDatabase()
-    const collection = db.collection<StoredAnalysis>('analyses')
-
-    return await collection.findOne({ courseId })
-  } catch (error) {
-    console.error('[DB] Error getting analysis:', error)
-    return null
-  }
-}
-
-export async function getRecentAnalyses(limit: number = 50): Promise<StoredAnalysis[]> {
-  try {
-    const { db } = await connectToDatabase()
-    const collection = db.collection<StoredAnalysis>('analyses')
-
-    return await collection
+    const collection: Collection<StoredAnalysis> = database.collection('analyses')
+    const analyses = await collection
       .find({})
       .sort({ createdAt: -1 })
       .limit(limit)
       .toArray()
+    return analyses
   } catch (error) {
-    console.error('[DB] Error getting recent analyses:', error)
+    console.error('[MONGODB] Get analyses error:', error)
     return []
   }
 }
 
-export async function updateKeywordSelection(
-  analysisId: string,
-  keyword: string,
-  selected: boolean
-): Promise<boolean> {
-  try {
-    const { db } = await connectToDatabase()
-    const collection = db.collection<StoredAnalysis>('analyses')
+export async function getAnalysisMongo(courseId: string): Promise<StoredAnalysis | null> {
+  const database = await getDb()
+  if (!database) return null
 
-    await collection.updateOne(
-      { _id: new ObjectId(analysisId), 'analyzedKeywords.keyword': keyword },
-      { $set: { 'analyzedKeywords.$.selected': selected, updatedAt: new Date() } }
-    )
-    return true
+  try {
+    const collection: Collection<StoredAnalysis> = database.collection('analyses')
+    return await collection.findOne({ courseId })
   } catch (error) {
-    console.error('[DB] Error updating selection:', error)
-    return false
+    console.error('[MONGODB] Get analysis error:', error)
+    return null
   }
 }
 
-// Clean up expired cache entries
-export async function cleanExpiredCache(): Promise<number> {
-  try {
-    const { db } = await connectToDatabase()
-    const collection = db.collection<StoredKeywordCache>('keyword_cache')
+// Cleanup old cache entries
+export async function cleanupExpiredCacheMongo(): Promise<number> {
+  const database = await getDb()
+  if (!database) return 0
 
+  try {
+    const collection: Collection<CacheEntry> = database.collection('keyword_cache')
     const result = await collection.deleteMany({
       expiresAt: { $lt: new Date() }
     })
-
-    if (result.deletedCount > 0) {
-      console.log('[CACHE] Cleaned', result.deletedCount, 'expired entries')
-    }
+    console.log('[MONGODB] Cleaned up', result.deletedCount, 'expired cache entries')
     return result.deletedCount
   } catch (error) {
-    console.error('[CACHE] Error cleaning cache:', error)
+    console.error('[MONGODB] Cleanup error:', error)
     return 0
   }
 }

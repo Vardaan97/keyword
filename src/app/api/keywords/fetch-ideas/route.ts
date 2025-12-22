@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId } from '@/lib/google-ads'
 import { getKeywordData, getRelatedKeywords, getKeywordsEverywhereConfig, CountryCode } from '@/lib/keywords-everywhere'
-import { getCachedKeywords, setCachedKeywords, KeywordData } from '@/lib/mongodb'
+import { getCachedKeywords, setCachedKeywords, getDatabaseStatus, UnifiedKeywordData } from '@/lib/database'
 import { KeywordIdea, ApiResponse } from '@/types'
 
 interface FetchIdeasRequest {
@@ -191,14 +191,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
   }
 
   // Check cache first (unless skipCache is true)
-  if (!skipCache) {
+  const dbStatus = getDatabaseStatus()
+  if (!skipCache && dbStatus.hasAnyDatabase) {
     try {
       const cached = await getCachedKeywords(seedKeywords, geoTarget, source)
       if (cached && cached.length > 0) {
         const processingTimeMs = Date.now() - startTime
         console.log('[FETCH-IDEAS] Cache hit!', cached.length, 'keywords in', processingTimeMs, 'ms')
 
-        // Convert KeywordData to KeywordIdea
+        // Convert to KeywordIdea
         const keywordIdeas: KeywordIdea[] = cached.map(kw => ({
           keyword: kw.keyword,
           avgMonthlySearches: kw.avgMonthlySearches,
@@ -211,19 +212,20 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         return NextResponse.json({
           success: true,
           data: keywordIdeas,
-          meta: { source: 'cache', cached: true, processingTimeMs }
+          meta: { source: 'cache', cached: true, processingTimeMs, databases: dbStatus }
         })
       }
     } catch (cacheError) {
-      console.log('[FETCH-IDEAS] Cache check failed (MongoDB may not be running):', cacheError)
+      console.log('[FETCH-IDEAS] Cache check failed:', cacheError)
       // Continue without cache
     }
   }
 
-  // Helper function to cache results
+  // Helper function to cache results (writes to both Supabase and MongoDB)
   const cacheResults = async (keywords: KeywordIdea[], actualSource: string) => {
+    if (!dbStatus.hasAnyDatabase) return
     try {
-      const keywordData: KeywordData[] = keywords.map(kw => ({
+      const keywordData: UnifiedKeywordData[] = keywords.map(kw => ({
         keyword: kw.keyword,
         avgMonthlySearches: kw.avgMonthlySearches,
         competition: kw.competition,
@@ -233,7 +235,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       }))
       await setCachedKeywords(seedKeywords, geoTarget, actualSource, keywordData)
     } catch (err) {
-      console.log('[FETCH-IDEAS] Failed to cache results (MongoDB may not be running):', err)
+      console.log('[FETCH-IDEAS] Failed to cache results:', err)
     }
   }
 
