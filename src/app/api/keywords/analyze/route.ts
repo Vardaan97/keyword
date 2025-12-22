@@ -26,8 +26,9 @@ interface AnalysisResponse {
 }
 
 // Max keywords per batch (to stay within token limits)
-// Reduced to 50 keywords for more reliable JSON output
-const MAX_KEYWORDS_PER_BATCH = 50
+// Reduced to 30 keywords - each keyword generates ~800 chars of JSON output
+// 30 keywords × 800 chars = ~24,000 chars which stays well within token limits
+const MAX_KEYWORDS_PER_BATCH = 30
 
 /**
  * Extract complete JSON objects from a potentially truncated array
@@ -187,38 +188,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
               messages: [
                 {
                   role: 'system',
-                  content: `You are a Google Ads keyword strategist for Koenig Solutions, analyzing keywords for IT training courses.
+                  content: `You are a Google Ads keyword strategist for Koenig Solutions. Output ONLY minified JSON (no whitespace/newlines in output).
 
-Output your analysis as a valid JSON object with this exact structure:
-{
-  "analyzedKeywords": [...]
-}
+Return: {"analyzedKeywords":[...]}
 
-Each keyword in analyzedKeywords should have these fields:
-- keyword (string)
-- avgMonthlySearches (number)
-- competition ("LOW" | "MEDIUM" | "HIGH" | "UNSPECIFIED")
-- competitionIndex (number 0-100)
-- courseRelevance (number 0-10)
-- relevanceStatus (string: EXACT_MATCH, DIRECT_RELATED, STRONGLY_RELATED, RELATED, LOOSELY_RELATED, TANGENTIAL, WEAK_CONNECTION, DIFFERENT_PRODUCT, DIFFERENT_VENDOR, NOT_RELEVANT)
-- conversionPotential (number 0-10)
-- searchIntent (number 0-10)
-- vendorSpecificity (number 0-10)
-- keywordSpecificity (number 0-10)
-- actionWordStrength (number 0-10)
-- commercialSignals (number 0-10)
-- negativeSignals (number 0-10)
-- koenigFit (number 0-10)
-- baseScore (number 0-100)
-- competitionBonus (number: 10 for Low, 5 for Medium, 0 for High)
-- finalScore (number 0-100)
-- tier ("Tier 1" | "Tier 2" | "Tier 3" | "Tier 4" | "Review" | "Exclude")
-- matchType ("[EXACT]" | "PHRASE" | "BROAD" | "N/A")
-- action ("ADD" | "BOOST" | "MONITOR" | "OPTIMIZE" | "REVIEW" | "EXCLUDE" | "EXCLUDE_RELEVANCE")
-- exclusionReason (string, only if excluded)
-- priority (string with emoji: "🔴 URGENT" | "🟠 HIGH" | "🟡 MEDIUM" | "⚪ STANDARD" | "🔵 REVIEW", only for ADD action)
+Each keyword object fields (use short keys to reduce output size):
+keyword, avgMonthlySearches, competition (LOW/MEDIUM/HIGH/UNSPECIFIED), competitionIndex (0-100), courseRelevance (0-10), relevanceStatus (EXACT_MATCH/DIRECT_RELATED/STRONGLY_RELATED/RELATED/LOOSELY_RELATED/TANGENTIAL/WEAK_CONNECTION/DIFFERENT_PRODUCT/DIFFERENT_VENDOR/NOT_RELEVANT), conversionPotential (0-10), searchIntent (0-10), vendorSpecificity (0-10), keywordSpecificity (0-10), actionWordStrength (0-10), commercialSignals (0-10), negativeSignals (0-10), koenigFit (0-10), baseScore (0-100), competitionBonus (10/5/0), finalScore (0-100), tier (Tier 1/Tier 2/Tier 3/Tier 4/Review/Exclude), matchType ([EXACT]/PHRASE/BROAD/N/A), action (ADD/BOOST/MONITOR/OPTIMIZE/REVIEW/EXCLUDE/EXCLUDE_RELEVANCE), exclusionReason (only if excluded), priority (🔴 URGENT/🟠 HIGH/🟡 MEDIUM/⚪ STANDARD/🔵 REVIEW, only for ADD)
 
-IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. Analyze ALL ${batchKeywords.length} keywords provided.`
+CRITICAL: Output minified JSON only. No markdown. No code blocks. Analyze ALL ${batchKeywords.length} keywords.`
                 },
                 {
                   role: 'user',
