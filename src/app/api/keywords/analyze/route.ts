@@ -61,8 +61,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     })
 
     // Process keywords in batches to avoid response truncation
-    // Mini models can handle ~50 keywords per batch reliably
-    const BATCH_SIZE = 50
+    // Gemini Flash and GPT-4o can handle larger batches (100 keywords)
+    // This reduces 996 keywords from 20 batches to 10 batches
+    const BATCH_SIZE = 100
     const keywordBatches: KeywordIdea[][] = []
     for (let i = 0; i < keywords.length; i += BATCH_SIZE) {
       keywordBatches.push(keywords.slice(i, i + BATCH_SIZE))
@@ -72,10 +73,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
 
     const allAnalyzedKeywords: AnalyzedKeyword[] = []
 
-    for (let batchIndex = 0; batchIndex < keywordBatches.length; batchIndex++) {
-      const batch = keywordBatches[batchIndex]
+    // Process batches in parallel (3 at a time for speed while avoiding rate limits)
+    const PARALLEL_BATCHES = 3
+
+    const processBatch = async (batch: KeywordIdea[], batchIndex: number): Promise<AnalyzedKeyword[]> => {
       console.log('[ANALYZE] Processing batch', batchIndex + 1, 'of', keywordBatches.length, '(', batch.length, 'keywords)')
-      // Format this batch's keywords
+
       const batchKeywordsData = batch.map(kw =>
         `${kw.keyword},${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex}`
       ).join('\n')
@@ -90,13 +93,13 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         KEYWORDS_DATA: batchFormattedKeywords
       })
 
-      // Call AI using unified client with JSON mode
-      const result = await aiClient.chatCompletionWithFallback(
-        {
-          messages: [
-            {
-              role: 'system',
-              content: `You are a Google Ads keyword strategist for Koenig Solutions, analyzing keywords for IT training courses.
+      try {
+        const result = await aiClient.chatCompletionWithFallback(
+          {
+            messages: [
+              {
+                role: 'system',
+                content: `You are a Google Ads keyword strategist for Koenig Solutions, analyzing keywords for IT training courses.
 
 Output your analysis as a valid JSON object with this exact structure:
 {
@@ -128,30 +131,29 @@ Each keyword in analyzedKeywords should have these fields:
 - priority (string with emoji: "🔴 URGENT" | "🟠 HIGH" | "🟡 MEDIUM" | "⚪ STANDARD" | "🔵 REVIEW", only for ADD action)
 
 IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. Analyze ALL ${batch.length} keywords provided.`
-            },
-            {
-              role: 'user',
-              content: batchFilledPrompt
-            }
-          ],
-          temperature: 0.3,
-          maxTokens: 16000,
-          jsonMode: true
-        },
-        { provider: aiProvider }
-      )
+              },
+              {
+                role: 'user',
+                content: batchFilledPrompt
+              }
+            ],
+            temperature: 0.3,
+            maxTokens: 16000,
+            jsonMode: true
+          },
+          { provider: aiProvider }
+        )
 
-      const responseText = result.content
-      console.log('[ANALYZE] Batch', batchIndex + 1, 'response from', result.provider, '(', result.model, ')')
-      console.log('[ANALYZE] Batch', batchIndex + 1, 'response length:', responseText.length, 'chars')
-      console.log('[ANALYZE] Batch', batchIndex + 1, 'tokens used:', result.tokensUsed)
+        const responseText = result.content
+        console.log('[ANALYZE] Batch', batchIndex + 1, 'response from', result.provider, '(', result.model, ')')
+        console.log('[ANALYZE] Batch', batchIndex + 1, 'response length:', responseText.length, 'chars')
+        console.log('[ANALYZE] Batch', batchIndex + 1, 'tokens used:', result.tokensUsed)
 
-      try {
         const batchResult = JSON.parse(responseText)
         console.log('[ANALYZE] Batch', batchIndex + 1, 'parsed successfully,', batchResult.analyzedKeywords?.length || 0, 'keywords')
+
         if (batchResult.analyzedKeywords && Array.isArray(batchResult.analyzedKeywords)) {
-          // Merge with original keyword data
-          const mergedBatch = batchResult.analyzedKeywords.map((analyzed: Partial<AnalyzedKeyword>) => {
+          return batchResult.analyzedKeywords.map((analyzed: Partial<AnalyzedKeyword>) => {
             const original = batch.find(k =>
               k.keyword.toLowerCase() === analyzed.keyword?.toLowerCase()
             )
@@ -182,13 +184,22 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. A
               priority: analyzed.priority
             } as AnalyzedKeyword
           })
-          allAnalyzedKeywords.push(...mergedBatch)
         }
+        return []
       } catch (parseError) {
-        console.error('[ANALYZE] Batch', batchIndex + 1, 'parse error')
-        console.error('[ANALYZE] Response preview:', responseText.substring(0, 500))
-        // Continue with other batches even if one fails
+        console.error('[ANALYZE] Batch', batchIndex + 1, 'error:', parseError)
+        return []
       }
+    }
+
+    // Process batches in parallel chunks
+    for (let i = 0; i < keywordBatches.length; i += PARALLEL_BATCHES) {
+      const batchChunk = keywordBatches.slice(i, i + PARALLEL_BATCHES)
+      const results = await Promise.all(
+        batchChunk.map((batch, idx) => processBatch(batch, i + idx))
+      )
+      results.forEach(result => allAnalyzedKeywords.push(...result))
+      console.log('[ANALYZE] Completed parallel chunk', Math.floor(i / PARALLEL_BATCHES) + 1)
     }
 
     // If no keywords were analyzed, return error
