@@ -26,8 +26,62 @@ interface AnalysisResponse {
 }
 
 // Max keywords per batch (to stay within token limits)
-// ~100 keywords for more reliable JSON output
-const MAX_KEYWORDS_PER_BATCH = 100
+// Reduced to 50 keywords for more reliable JSON output
+const MAX_KEYWORDS_PER_BATCH = 50
+
+/**
+ * Extract complete JSON objects from a potentially truncated array
+ * This is the most reliable way to handle AI responses that get cut off
+ */
+function extractCompleteObjects(jsonString: string): object[] {
+  const objects: object[] = []
+  let depth = 0
+  let start = -1
+  let inString = false
+  let escaped = false
+
+  for (let i = 0; i < jsonString.length; i++) {
+    const char = jsonString[i]
+
+    // Handle string escaping
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === '\\' && inString) {
+      escaped = true
+      continue
+    }
+    if (char === '"') {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+
+    // Track object depth
+    if (char === '{') {
+      if (depth === 0) start = i
+      depth++
+    } else if (char === '}') {
+      depth--
+      if (depth === 0 && start !== -1) {
+        const objStr = jsonString.substring(start, i + 1)
+        try {
+          const obj = JSON.parse(objStr)
+          // Validate it's a keyword object with required fields
+          if (obj.keyword && typeof obj.keyword === 'string') {
+            objects.push(obj)
+          }
+        } catch {
+          // Skip malformed objects
+        }
+        start = -1
+      }
+    }
+  }
+
+  return objects
+}
 
 /**
  * Attempt to repair malformed JSON from AI responses
@@ -38,60 +92,42 @@ function repairJson(jsonString: string): string {
 
   // Remove any markdown code blocks
   repaired = repaired.replace(/^```json?\s*/i, '').replace(/\s*```$/i, '')
+  repaired = repaired.replace(/```\s*$/i, '')
 
+  // First try: simple fixes
   // Fix trailing commas before closing brackets
   repaired = repaired.replace(/,(\s*[\]}])/g, '$1')
 
-  // Count brackets to check for truncation
-  const openBraces = (repaired.match(/\{/g) || []).length
-  const closeBraces = (repaired.match(/\}/g) || []).length
-  const openBrackets = (repaired.match(/\[/g) || []).length
-  const closeBrackets = (repaired.match(/\]/g) || []).length
+  // Try to parse as-is first
+  try {
+    JSON.parse(repaired)
+    return repaired
+  } catch {
+    // Continue with repair
+  }
 
-  // If array is truncated (missing closing brackets), try to close it
-  if (openBrackets > closeBrackets) {
-    // Find the last complete object in the array
-    const lastCompleteObjectMatch = repaired.match(/.*\}(?=\s*,?\s*$)/s)
-    if (lastCompleteObjectMatch) {
-      const lastIndex = repaired.lastIndexOf('}')
-      if (lastIndex !== -1) {
-        // Truncate to last complete object and close the structure
-        repaired = repaired.substring(0, lastIndex + 1)
-        // Add missing closing brackets and braces
-        const missingBrackets = openBrackets - (repaired.match(/\]/g) || []).length
-        const missingBraces = openBraces - (repaired.match(/\}/g) || []).length
-        repaired += ']'.repeat(missingBrackets)
-        repaired += '}'.repeat(missingBraces)
-      }
+  // Second try: Extract complete objects from the analyzedKeywords array
+  const arrayMatch = repaired.match(/"analyzedKeywords"\s*:\s*\[/i)
+  if (arrayMatch) {
+    const arrayStartIndex = repaired.indexOf('[', arrayMatch.index)
+    const arrayContent = repaired.substring(arrayStartIndex + 1)
+    const completeObjects = extractCompleteObjects(arrayContent)
+
+    if (completeObjects.length > 0) {
+      console.log(`[JSON_REPAIR] Extracted ${completeObjects.length} complete keyword objects`)
+      return JSON.stringify({ analyzedKeywords: completeObjects })
     }
   }
 
-  // If still unbalanced, try a more aggressive fix
-  if (openBraces !== (repaired.match(/\}/g) || []).length ||
-      openBrackets !== (repaired.match(/\]/g) || []).length) {
-    // Try to find and extract just the analyzedKeywords array
-    const arrayMatch = repaired.match(/"analyzedKeywords"\s*:\s*\[([\s\S]*)/i)
-    if (arrayMatch) {
-      let arrayContent = arrayMatch[1]
-      // Find all complete objects in the array
-      const objects: string[] = []
-      let depth = 0
-      let start = -1
-      for (let i = 0; i < arrayContent.length; i++) {
-        if (arrayContent[i] === '{') {
-          if (depth === 0) start = i
-          depth++
-        } else if (arrayContent[i] === '}') {
-          depth--
-          if (depth === 0 && start !== -1) {
-            objects.push(arrayContent.substring(start, i + 1))
-            start = -1
-          }
-        }
-      }
-      if (objects.length > 0) {
-        repaired = `{"analyzedKeywords":[${objects.join(',')}]}`
-      }
+  // Third try: look for any array of objects
+  const anyArrayMatch = repaired.match(/\[\s*\{/)
+  if (anyArrayMatch) {
+    const arrayContent = repaired.substring(anyArrayMatch.index! + 1)
+    const completeObjects = extractCompleteObjects(arrayContent)
+
+    if (completeObjects.length > 0) {
+      console.log(`[JSON_REPAIR] Extracted ${completeObjects.length} objects from array`)
+      return JSON.stringify({ analyzedKeywords: completeObjects })
     }
   }
 
