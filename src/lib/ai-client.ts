@@ -31,30 +31,32 @@ export interface ChatCompletionResult {
   model: string
 }
 
-// OpenRouter models - organized by context window size
+// OpenRouter models - organized by use case
 const OPENROUTER_MODELS = {
-  // Large context models (for keyword analysis - need high output tokens)
-  default: 'anthropic/claude-sonnet-4', // 200K context, excellent JSON output
-  claude_sonnet: 'anthropic/claude-sonnet-4',
-  gemini_pro: 'google/gemini-2.5-pro-preview-06-05', // 1M context
+  // Default: Gemini Flash - fast, cheap, 1M context, good JSON output
+  default: 'google/gemini-2.0-flash-001',
+  // Gemini models
+  gemini_flash: 'google/gemini-2.0-flash-001', // 1M context, 8K output
+  gemini_pro: 'google/gemini-2.5-pro-preview-06-05', // 1M context, 65K output
+  // OpenAI models
   gpt4o: 'openai/gpt-4o', // 128K context
-  // Fast & cheap mini models (for smaller tasks)
-  mini: 'google/gemini-2.0-flash-001',
+  gpt4o_mini: 'openai/gpt-4o-mini', // 128K context, cheaper
+  // Claude models (if needed)
+  claude_sonnet: 'anthropic/claude-sonnet-4',
   claude_haiku: 'anthropic/claude-3-haiku',
-  gpt4o_mini: 'openai/gpt-4o-mini',
-  gemini_flash: 'google/gemini-2.0-flash-001',
 } as const
 
 // OpenAI models
 const OPENAI_MODELS = {
-  default: 'gpt-4o',
+  default: 'gpt-4o-mini', // Use mini as default - cheaper and faster
+  full: 'gpt-4o',
   mini: 'gpt-4o-mini',
 } as const
 
 // Default model selection based on provider
 const DEFAULT_MODELS: Record<AIProvider, string> = {
-  openai: OPENAI_MODELS.default,
-  openrouter: OPENROUTER_MODELS.default, // Use Claude Sonnet 4 for high quality output
+  openai: OPENAI_MODELS.default, // gpt-4o-mini
+  openrouter: OPENROUTER_MODELS.default, // gemini-2.0-flash
 }
 
 class AIClient {
