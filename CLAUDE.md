@@ -1,5 +1,15 @@
 # Keyword Planner - Claude Code Instructions
 
+## AI Assistant Rules
+
+**Always use context7** when needing:
+- Code generation or implementation
+- API documentation (Google Ads, MongoDB, Supabase, Next.js, etc.)
+- Library setup or configuration steps
+- Up-to-date syntax and best practices
+
+---
+
 ## Project Overview
 
 AI-powered keyword research tool for Koenig Solutions' Google Ads campaigns. Combines OpenAI GPT-4o with keyword data APIs to generate, analyze, and prioritize keywords for IT training courses.

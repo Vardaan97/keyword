@@ -4,6 +4,25 @@ import { KeywordIdea } from '@/types'
 // v18 sunset, v19/v20/v21 still active, v22 is current
 const GOOGLE_ADS_API_VERSION = 'v22'
 
+// Per-account cache for keywords (refreshed every 10 minutes)
+const accountKeywordsCacheMap: Map<string, { keywords: Set<string>; timestamp: number }> = new Map()
+const CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes
+
+// Google Ads Account configuration
+export interface GoogleAdsAccount {
+  id: string
+  name: string
+  customerId: string
+}
+
+// Available accounts under the MCC (Manager account)
+// These are the sub-accounts accessible via the login customer ID
+export const GOOGLE_ADS_ACCOUNTS: GoogleAdsAccount[] = [
+  { id: 'koenig-main', name: 'Koenig Solutions', customerId: '3515012934' },
+  { id: 'bouquet-inr', name: 'Bouquet INR', customerId: '6153038296' },
+  { id: 'bouquet-inr-2', name: 'Bouquet INR - 2', customerId: '6601080005' }
+]
+
 interface GoogleAdsConfig {
   developerToken: string
   clientId: string
@@ -20,6 +39,89 @@ interface KeywordPlannerRequest {
   language?: string
 }
 
+/**
+ * Fetch all keywords currently in a specific Google Ads account
+ * Uses per-account caching to support multiple sub-accounts under MCC
+ */
+async function getAccountKeywords(config: GoogleAdsConfig, customerId: string): Promise<Set<string>> {
+  const cleanCustomerId = customerId.replace(/-/g, '')
+
+  // Check per-account cache first
+  const cached = accountKeywordsCacheMap.get(cleanCustomerId)
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    console.log(`[GOOGLE-ADS] Using cached keywords for account ${cleanCustomerId}:`, cached.keywords.size, 'keywords')
+    return cached.keywords
+  }
+
+  console.log(`[GOOGLE-ADS] Fetching keywords for account ${cleanCustomerId}...`)
+  const accessToken = await getAccessToken(config)
+  const loginCustomerId = config.loginCustomerId.replace(/-/g, '')
+
+  // Query to get all active keywords in the account
+  const query = `
+    SELECT
+      ad_group_criterion.keyword.text
+    FROM keyword_view
+    WHERE ad_group_criterion.status != 'REMOVED'
+    LIMIT 10000
+  `
+
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${cleanCustomerId}/googleAds:search`
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'developer-token': config.developerToken,
+        'login-customer-id': loginCustomerId,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ query })
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      console.error(`[GOOGLE-ADS] Failed to fetch keywords for account ${cleanCustomerId}:`, error.error?.message || 'Unknown error')
+      return new Set()
+    }
+
+    const data = await response.json()
+    const keywords = new Set<string>()
+
+    if (data.results) {
+      for (const result of data.results) {
+        const keywordText = result.adGroupCriterion?.keyword?.text
+        if (keywordText) {
+          keywords.add(keywordText.toLowerCase())
+        }
+      }
+    }
+
+    console.log(`[GOOGLE-ADS] Found ${keywords.size} keywords in account ${cleanCustomerId}`)
+
+    // Update per-account cache
+    accountKeywordsCacheMap.set(cleanCustomerId, {
+      keywords,
+      timestamp: Date.now()
+    })
+
+    return keywords
+  } catch (error) {
+    console.error(`[GOOGLE-ADS] Error fetching keywords for account ${cleanCustomerId}:`, error)
+    return new Set()
+  }
+}
+
+/**
+ * Get account name by customer ID
+ */
+export function getAccountName(customerId: string): string {
+  const cleanId = customerId.replace(/-/g, '')
+  const account = GOOGLE_ADS_ACCOUNTS.find(acc => acc.customerId === cleanId)
+  return account?.name || `Account ${cleanId}`
+}
+
 export async function getKeywordIdeas(
   config: GoogleAdsConfig,
   request: KeywordPlannerRequest
@@ -29,9 +131,13 @@ export async function getKeywordIdeas(
   console.log('[GOOGLE-ADS] Seeds:', request.seedKeywords)
   console.log('[GOOGLE-ADS] Geo Targets:', request.geoTargetConstants)
 
-  // First, get a fresh access token
-  const accessToken = await getAccessToken(config)
+  // Fetch account keywords in parallel with the access token
+  const [accessToken, accountKeywords] = await Promise.all([
+    getAccessToken(config),
+    getAccountKeywords(config, request.customerId)
+  ])
   console.log('[GOOGLE-ADS] Access token obtained successfully')
+  console.log('[GOOGLE-ADS] Account keywords loaded:', accountKeywords.size, 'keywords')
 
   const customerId = request.customerId.replace(/-/g, '')
   const loginCustomerId = config.loginCustomerId.replace(/-/g, '')
@@ -97,11 +203,21 @@ export async function getKeywordIdeas(
     console.log('[GOOGLE-ADS] Has next page token - more results available')
   }
 
+  // Log first few results to debug keywordAnnotations structure
+  if (data.results && data.results.length > 0) {
+    console.log('[GOOGLE-ADS] Sample result structure (first keyword):', JSON.stringify(data.results[0], null, 2))
+    // Check if any results have keywordAnnotations
+    const withAnnotations = data.results.filter((r: Record<string, unknown>) => r.keywordAnnotations)
+    console.log('[GOOGLE-ADS] Results with keywordAnnotations:', withAnnotations.length)
+    if (withAnnotations.length > 0) {
+      console.log('[GOOGLE-ADS] Sample annotation:', JSON.stringify(withAnnotations[0].keywordAnnotations, null, 2))
+    }
+  }
+
   // Parse the response
   let inAccountCount = 0
   const keywordIdeas: KeywordIdea[] = (data.results || []).map((result: Record<string, unknown>) => {
     const metrics = result.keywordIdeaMetrics as Record<string, unknown> || {}
-    const annotations = result.keywordAnnotations as Record<string, unknown> | undefined
 
     // Parse competition
     let competition: 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED' = 'UNSPECIFIED'
@@ -111,10 +227,9 @@ export async function getKeywordIdeas(
     else if (competitionStr === 'HIGH') competition = 'HIGH'
 
     // Check if keyword is already in the Google Ads account
-    // The API returns keywordAnnotations.concepts when the keyword exists in the account
-    const inAccount = !!(annotations &&
-      Array.isArray(annotations.concepts) &&
-      annotations.concepts.length > 0)
+    // Cross-reference against actual keywords fetched from the account
+    const keywordText = (result.text as string).toLowerCase()
+    const inAccount = accountKeywords.has(keywordText)
 
     if (inAccount) inAccountCount++
 

@@ -13,10 +13,15 @@ import {
 import { DEFAULT_SEED_PROMPT, DEFAULT_ANALYSIS_PROMPT } from './prompts'
 import { generateId } from './utils'
 import { AIProvider } from './ai-client'
+import { GOOGLE_ADS_ACCOUNTS, GoogleAdsAccount } from './google-ads'
 
 // Data source types
 export type DataSourceType = 'auto' | 'google' | 'keywords_everywhere'
 export type CountryCode = 'india' | 'usa' | 'uk' | 'uae' | 'singapore' | 'australia' | 'canada' | 'germany' | 'malaysia' | 'saudi' | 'global'
+
+// Re-export Google Ads accounts for easy access
+export { GOOGLE_ADS_ACCOUNTS }
+export type { GoogleAdsAccount }
 
 export const COUNTRY_OPTIONS: { value: CountryCode; label: string; flag: string }[] = [
   { value: 'india', label: 'India', flag: '🇮🇳' },
@@ -57,6 +62,11 @@ interface AppState {
   targetCountry: CountryCode
   setDataSource: (source: DataSourceType) => void
   setTargetCountry: (country: CountryCode) => void
+
+  // Google Ads Account Selection (for "in account" check)
+  selectedGoogleAdsAccountId: string
+  setSelectedGoogleAdsAccountId: (accountId: string) => void
+  getSelectedGoogleAdsAccount: () => GoogleAdsAccount | undefined
 
   // AI Provider Settings
   aiProvider: AIProvider
@@ -115,6 +125,14 @@ export const useAppStore = create<AppState>()(
       targetCountry: 'india',
       setDataSource: (source) => set({ dataSource: source }),
       setTargetCountry: (country) => set({ targetCountry: country }),
+
+      // Google Ads Account Selection (default to first account)
+      selectedGoogleAdsAccountId: GOOGLE_ADS_ACCOUNTS[0]?.id || 'koenig-main',
+      setSelectedGoogleAdsAccountId: (accountId) => set({ selectedGoogleAdsAccountId: accountId }),
+      getSelectedGoogleAdsAccount: () => {
+        const accountId = get().selectedGoogleAdsAccountId
+        return GOOGLE_ADS_ACCOUNTS.find(acc => acc.id === accountId)
+      },
 
       // AI Provider Settings (default to openrouter for cost-effectiveness)
       aiProvider: 'openrouter',
@@ -238,6 +256,7 @@ export const useAppStore = create<AppState>()(
         sessionHistory: state.sessionHistory,
         dataSource: state.dataSource,
         targetCountry: state.targetCountry,
+        selectedGoogleAdsAccountId: state.selectedGoogleAdsAccountId,
         aiProvider: state.aiProvider,
         savedBatchItems: state.savedBatchItems
       })

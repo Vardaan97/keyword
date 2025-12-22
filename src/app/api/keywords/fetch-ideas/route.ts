@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId } from '@/lib/google-ads'
+import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId, GOOGLE_ADS_ACCOUNTS, getAccountName } from '@/lib/google-ads'
 import { getKeywordData, getRelatedKeywords, getKeywordsEverywhereConfig, CountryCode } from '@/lib/keywords-everywhere'
 import { getCachedKeywords, setCachedKeywords, getDatabaseStatus, UnifiedKeywordData } from '@/lib/database'
 import { KeywordIdea, ApiResponse } from '@/types'
@@ -10,6 +10,7 @@ interface FetchIdeasRequest {
   geoTarget?: string
   source?: 'google' | 'keywords_everywhere' | 'auto' // Allow choosing data source
   skipCache?: boolean // Force fresh fetch
+  accountId?: string // Google Ads account ID for "in account" check
 }
 
 // Map geo targets to Keywords Everywhere country codes
@@ -174,13 +175,26 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
 
   // Parse body outside try block so it's accessible in catch for fallback
   const body: FetchIdeasRequest = await request.json()
-  const { seedKeywords, geoTarget = 'india', source = 'auto', skipCache = false } = body
+  const { seedKeywords, geoTarget = 'india', source = 'auto', skipCache = false, accountId } = body
+
+  // Resolve customer ID from accountId or use default
+  let customerId = getDefaultCustomerId()
+  let accountName = getAccountName(customerId)
+
+  if (accountId) {
+    const account = GOOGLE_ADS_ACCOUNTS.find(acc => acc.id === accountId)
+    if (account) {
+      customerId = account.customerId
+      accountName = account.name
+    }
+  }
 
   console.log('[FETCH-IDEAS] Request received')
   console.log('[FETCH-IDEAS] Seeds:', seedKeywords)
   console.log('[FETCH-IDEAS] Geo Target:', geoTarget)
   console.log('[FETCH-IDEAS] Source:', source)
   console.log('[FETCH-IDEAS] Skip Cache:', skipCache)
+  console.log('[FETCH-IDEAS] Account:', accountName, '(', customerId, ')')
 
   if (!seedKeywords || seedKeywords.length === 0) {
     console.log('[FETCH-IDEAS] Error: No seed keywords provided')
@@ -267,12 +281,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
   // Try Google Ads first (if source is 'google' or 'auto')
   try {
     const config = getGoogleAdsConfig()
-    const customerId = getDefaultCustomerId()
 
     console.log('[FETCH-IDEAS] Google Ads config check:')
     console.log('[FETCH-IDEAS] - Developer token:', config.developerToken ? 'SET' : 'NOT SET')
     console.log('[FETCH-IDEAS] - Refresh token:', config.refreshToken ? 'SET' : 'NOT SET')
-    console.log('[FETCH-IDEAS] - Customer ID:', customerId ? customerId : 'NOT SET')
+    console.log('[FETCH-IDEAS] - Customer ID:', customerId)
+    console.log('[FETCH-IDEAS] - Account Name:', accountName)
 
     if (!config.developerToken || !config.refreshToken || !customerId) {
       throw new Error('Google Ads API credentials not configured')
@@ -312,7 +326,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     return NextResponse.json({
       success: true,
       data: keywordIdeas,
-      meta: { source: 'google_ads', processingTimeMs }
+      meta: { source: 'google_ads', processingTimeMs, accountName, customerId }
     })
 
   } catch (googleError) {

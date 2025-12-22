@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useCallback, useRef, useEffect } from "react"
-import { useAppStore, COUNTRY_OPTIONS, DATA_SOURCE_OPTIONS, DataSourceType, CountryCode } from "@/lib/store"
+import { useAppStore, COUNTRY_OPTIONS, DATA_SOURCE_OPTIONS, DataSourceType, CountryCode, GOOGLE_ADS_ACCOUNTS } from "@/lib/store"
 import { DEFAULT_SEED_PROMPT, DEFAULT_ANALYSIS_PROMPT } from "@/lib/prompts"
 import {
   CourseInput,
@@ -66,6 +66,8 @@ export default function Home() {
     targetCountry,
     setDataSource,
     setTargetCountry,
+    selectedGoogleAdsAccountId,
+    setSelectedGoogleAdsAccountId,
     savedBatchItems,
     setSavedBatchItems,
     clearSavedBatchItems
@@ -316,7 +318,8 @@ export default function Home() {
           seedKeywords: seedResult.data.map((s: SeedKeyword) => s.keyword),
           pageUrl: item.courseInput.courseUrl,
           geoTarget: targetCountry,
-          source: dataSource
+          source: dataSource,
+          accountId: selectedGoogleAdsAccountId
         }),
         signal
       })
@@ -827,16 +830,16 @@ export default function Home() {
                 </p>
               </div>
 
-              {/* Data Source & Country Settings */}
+              {/* Data Source, Account & Country Settings */}
               <div className="mb-8 p-6 rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)]">
                 <div className="flex items-center gap-2 mb-4">
                   <svg className="w-5 h-5 text-[var(--accent-electric)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
                   </svg>
-                  <h3 className="font-medium text-sm">Data Source & Region</h3>
+                  <h3 className="font-medium text-sm">Data Source, Account & Region</h3>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-3 gap-4">
                   {/* Data Source Selection */}
                   <div>
                     <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-2">
@@ -866,6 +869,36 @@ export default function Home() {
                             )}
                           </div>
                           <p className="text-xs text-[var(--text-muted)] mt-1">{option.description}</p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Google Ads Account Selection */}
+                  <div>
+                    <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-2">
+                      Google Ads Account
+                    </label>
+                    <p className="text-[10px] text-[var(--text-muted)] mb-2">For "In Account" check</p>
+                    <div className="space-y-2">
+                      {GOOGLE_ADS_ACCOUNTS.map((account) => (
+                        <button
+                          key={account.id}
+                          onClick={() => setSelectedGoogleAdsAccountId(account.id)}
+                          className={`w-full p-3 rounded-xl text-left transition-all ${
+                            selectedGoogleAdsAccountId === account.id
+                              ? 'bg-[var(--accent-violet)]/10 border-2 border-[var(--accent-violet)]'
+                              : 'bg-[var(--bg-tertiary)] border-2 border-transparent hover:border-[var(--border-default)]'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className={`text-sm font-medium ${
+                              selectedGoogleAdsAccountId === account.id ? 'text-[var(--accent-violet)]' : 'text-[var(--text-primary)]'
+                            }`}>
+                              {account.name}
+                            </span>
+                          </div>
+                          <p className="text-xs text-[var(--text-muted)] mt-1 font-mono">{account.customerId}</p>
                         </button>
                       ))}
                     </div>
@@ -901,11 +934,17 @@ export default function Home() {
 
                 {/* Current Selection Summary */}
                 <div className="mt-4 pt-4 border-t border-[var(--border-subtle)] flex items-center justify-between">
-                  <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-4 flex-wrap">
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-[var(--text-muted)]">Source:</span>
                       <span className="text-xs font-medium text-[var(--accent-electric)]">
                         {DATA_SOURCE_OPTIONS.find(o => o.value === dataSource)?.label}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-[var(--text-muted)]">Account:</span>
+                      <span className="text-xs font-medium text-[var(--accent-violet)]">
+                        {GOOGLE_ADS_ACCOUNTS.find(a => a.id === selectedGoogleAdsAccountId)?.name}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
@@ -1389,6 +1428,7 @@ export default function Home() {
                               />
                             </th>
                             <th className="text-left py-3 px-4">Keyword</th>
+                            <th className="text-center py-3 px-2 w-16">In Acct</th>
                             <th className="text-right py-3 px-4">Volume</th>
                             <th className="text-center py-3 px-4">Comp</th>
                             {detailViewMode === 'analyzed' && (
@@ -1428,6 +1468,17 @@ export default function Home() {
                                   </td>
                                   <td className="py-3 px-4">
                                     <span className="text-sm text-[var(--text-primary)]">{kw.keyword}</span>
+                                  </td>
+                                  <td className="py-3 px-2 text-center">
+                                    {kw.inAccount ? (
+                                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[var(--accent-lime)]/20 text-[var(--accent-lime)] text-xs font-bold" title="Already in account">
+                                        Y
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[var(--bg-tertiary)] text-[var(--text-muted)] text-xs" title="Not in account">
+                                        -
+                                      </span>
+                                    )}
                                   </td>
                                   <td className="py-3 px-4 text-right">
                                     <span className="font-mono text-sm text-[var(--text-secondary)]">
