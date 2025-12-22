@@ -21,6 +21,7 @@ export interface KeywordIdea {
   competitionIndex: number
   lowTopOfPageBidMicros?: number
   highTopOfPageBidMicros?: number
+  inAccount?: boolean  // Whether keyword is already in Google Ads account
 }
 
 export interface AnalyzedKeyword extends KeywordIdea {

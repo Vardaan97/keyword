@@ -49,7 +49,11 @@ export async function getKeywordIdeas(
     keywordPlanNetwork: 'GOOGLE_SEARCH',
     includeAdultKeywords: false,
     // Request more results - Google may return fewer based on relevance
-    pageSize: 1000
+    pageSize: 1000,
+    // Request keyword annotations to get "in account" status
+    historicalMetricsOptions: {
+      includeAverageCpc: true
+    }
   }
 
   // Only use keywordSeed - Google Ads API doesn't allow both seeds at once
@@ -94,8 +98,10 @@ export async function getKeywordIdeas(
   }
 
   // Parse the response
+  let inAccountCount = 0
   const keywordIdeas: KeywordIdea[] = (data.results || []).map((result: Record<string, unknown>) => {
     const metrics = result.keywordIdeaMetrics as Record<string, unknown> || {}
+    const annotations = result.keywordAnnotations as Record<string, unknown> | undefined
 
     // Parse competition
     let competition: 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED' = 'UNSPECIFIED'
@@ -104,13 +110,22 @@ export async function getKeywordIdeas(
     else if (competitionStr === 'MEDIUM') competition = 'MEDIUM'
     else if (competitionStr === 'HIGH') competition = 'HIGH'
 
+    // Check if keyword is already in the Google Ads account
+    // The API returns keywordAnnotations.concepts when the keyword exists in the account
+    const inAccount = !!(annotations &&
+      Array.isArray(annotations.concepts) &&
+      annotations.concepts.length > 0)
+
+    if (inAccount) inAccountCount++
+
     return {
       keyword: result.text as string,
       avgMonthlySearches: Number(metrics.avgMonthlySearches) || 0,
       competition,
       competitionIndex: Number(metrics.competitionIndex) || 0,
       lowTopOfPageBidMicros: Number(metrics.lowTopOfPageBidMicros) || undefined,
-      highTopOfPageBidMicros: Number(metrics.highTopOfPageBidMicros) || undefined
+      highTopOfPageBidMicros: Number(metrics.highTopOfPageBidMicros) || undefined,
+      inAccount
     }
   })
 
@@ -118,6 +133,7 @@ export async function getKeywordIdeas(
   const filteredIdeas = keywordIdeas.filter(kw => kw.avgMonthlySearches > 0)
 
   console.log('[GOOGLE-ADS] Parsed keyword ideas:', keywordIdeas.length, '(with volume:', filteredIdeas.length, ')')
+  console.log('[GOOGLE-ADS] Keywords already in account:', inAccountCount)
   if (filteredIdeas.length > 0) {
     console.log('[GOOGLE-ADS] Top keyword:', filteredIdeas[0])
     console.log('[GOOGLE-ADS] Volume range:', filteredIdeas[filteredIdeas.length - 1].avgMonthlySearches, '-', filteredIdeas[0].avgMonthlySearches)

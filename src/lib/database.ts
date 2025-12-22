@@ -30,6 +30,7 @@ export interface UnifiedKeywordData {
   competitionIndex: number
   lowTopOfPageBidMicros?: number
   highTopOfPageBidMicros?: number
+  inAccount?: boolean  // Whether keyword is already in Google Ads account
 }
 
 // Convert between formats
