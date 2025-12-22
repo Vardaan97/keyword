@@ -60,10 +60,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       KEYWORDS_DATA: formattedKeywords
     })
 
-    // Process keywords in batches to avoid response truncation
-    // Gemini Flash and GPT-4o can handle larger batches (100 keywords)
-    // This reduces 996 keywords from 20 batches to 10 batches
-    const BATCH_SIZE = 100
+    // Process keywords in batches
+    // Gemini Flash can handle 200 keywords per batch reliably
+    // This reduces 996 keywords from 20 batches to just 5 batches
+    const BATCH_SIZE = 200
     const keywordBatches: KeywordIdea[][] = []
     for (let i = 0; i < keywords.length; i += BATCH_SIZE) {
       keywordBatches.push(keywords.slice(i, i + BATCH_SIZE))
@@ -76,8 +76,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     // Process batches in parallel (3 at a time for speed while avoiding rate limits)
     const PARALLEL_BATCHES = 3
 
-    const processBatch = async (batch: KeywordIdea[], batchIndex: number): Promise<AnalyzedKeyword[]> => {
-      console.log('[ANALYZE] Processing batch', batchIndex + 1, 'of', keywordBatches.length, '(', batch.length, 'keywords)')
+    const processBatch = async (batch: KeywordIdea[], batchIndex: number, retryCount = 0): Promise<AnalyzedKeyword[]> => {
+      const MAX_RETRIES = 2
+      console.log('[ANALYZE] Processing batch', batchIndex + 1, 'of', keywordBatches.length, '(', batch.length, 'keywords)', retryCount > 0 ? `[Retry ${retryCount}]` : '')
 
       const batchKeywordsData = batch.map(kw =>
         `${kw.keyword},${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex}`
@@ -186,8 +187,17 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. A
           })
         }
         return []
-      } catch (parseError) {
-        console.error('[ANALYZE] Batch', batchIndex + 1, 'error:', parseError)
+      } catch (error) {
+        console.error('[ANALYZE] Batch', batchIndex + 1, 'error:', error)
+
+        // Retry on failure
+        if (retryCount < MAX_RETRIES) {
+          console.log('[ANALYZE] Retrying batch', batchIndex + 1, 'in 2 seconds...')
+          await new Promise(resolve => setTimeout(resolve, 2000))
+          return processBatch(batch, batchIndex, retryCount + 1)
+        }
+
+        console.error('[ANALYZE] Batch', batchIndex + 1, 'failed after', MAX_RETRIES, 'retries')
         return []
       }
     }

@@ -144,24 +144,55 @@ class AIClient {
 
     console.log(`[AI-CLIENT] Using ${provider} with model: ${model}`)
 
-    const completion = await client.chat.completions.create({
-      model,
-      messages: options.messages,
-      temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens ?? 1000,
-      ...(options.jsonMode && { response_format: { type: 'json_object' } }),
-    })
+    // JSON mode is only reliably supported by OpenAI
+    // For OpenRouter/Gemini, we rely on prompt engineering instead
+    const supportsJsonMode = provider === 'openai'
 
-    const content = completion.choices[0]?.message?.content || ''
-    const tokensUsed = completion.usage?.total_tokens
+    try {
+      const completion = await client.chat.completions.create({
+        model,
+        messages: options.messages,
+        temperature: options.temperature ?? 0.7,
+        max_tokens: options.maxTokens ?? 1000,
+        ...(options.jsonMode && supportsJsonMode && { response_format: { type: 'json_object' } }),
+      })
 
-    console.log(`[AI-CLIENT] Response received. Tokens: ${tokensUsed}`)
+      const content = completion.choices[0]?.message?.content || ''
+      const tokensUsed = completion.usage?.total_tokens
 
-    return {
-      content,
-      tokensUsed,
-      provider,
-      model,
+      console.log(`[AI-CLIENT] Response received. Tokens: ${tokensUsed}`)
+
+      // Validate JSON response if jsonMode was requested
+      if (options.jsonMode && content) {
+        try {
+          JSON.parse(content)
+        } catch {
+          // Try to extract JSON from response (sometimes models wrap in markdown)
+          const jsonMatch = content.match(/\{[\s\S]*\}/)
+          if (jsonMatch) {
+            console.log('[AI-CLIENT] Extracted JSON from response')
+            return {
+              content: jsonMatch[0],
+              tokensUsed,
+              provider,
+              model,
+            }
+          }
+          console.error('[AI-CLIENT] Response is not valid JSON:', content.substring(0, 200))
+          throw new Error('AI response is not valid JSON')
+        }
+      }
+
+      return {
+        content,
+        tokensUsed,
+        provider,
+        model,
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      console.error(`[AI-CLIENT] ${provider} error:`, errorMessage)
+      throw error
     }
   }
 
