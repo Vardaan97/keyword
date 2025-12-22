@@ -839,7 +839,7 @@ export default function Home() {
                   <h3 className="font-medium text-sm">Data Source, Account & Region</h3>
                 </div>
 
-                <div className="grid grid-cols-3 gap-4">
+                <div className={`grid gap-4 ${dataSource === 'keywords_everywhere' ? 'grid-cols-2' : 'grid-cols-3'}`}>
                   {/* Data Source Selection */}
                   <div>
                     <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-2">
@@ -874,35 +874,44 @@ export default function Home() {
                     </div>
                   </div>
 
-                  {/* Google Ads Account Selection */}
-                  <div>
-                    <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-2">
-                      Google Ads Account
-                    </label>
-                    <p className="text-[10px] text-[var(--text-muted)] mb-2">For "In Account" check</p>
-                    <div className="space-y-2">
-                      {GOOGLE_ADS_ACCOUNTS.map((account) => (
-                        <button
-                          key={account.id}
-                          onClick={() => setSelectedGoogleAdsAccountId(account.id)}
-                          className={`w-full p-3 rounded-xl text-left transition-all ${
-                            selectedGoogleAdsAccountId === account.id
-                              ? 'bg-[var(--accent-violet)]/10 border-2 border-[var(--accent-violet)]'
-                              : 'bg-[var(--bg-tertiary)] border-2 border-transparent hover:border-[var(--border-default)]'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className={`text-sm font-medium ${
-                              selectedGoogleAdsAccountId === account.id ? 'text-[var(--accent-violet)]' : 'text-[var(--text-primary)]'
-                            }`}>
-                              {account.name}
-                            </span>
-                          </div>
-                          <p className="text-xs text-[var(--text-muted)] mt-1 font-mono">{account.customerId}</p>
-                        </button>
-                      ))}
+                  {/* Google Ads Account Selection - Only show for Google Ads data source */}
+                  {dataSource !== 'keywords_everywhere' && (
+                    <div>
+                      <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-2">
+                        Google Ads Account
+                      </label>
+                      <p className="text-[10px] text-[var(--text-muted)] mb-2">For "In Account" check</p>
+                      <div className="space-y-2">
+                        {GOOGLE_ADS_ACCOUNTS.map((account) => (
+                          <button
+                            key={account.id}
+                            onClick={() => setSelectedGoogleAdsAccountId(account.id)}
+                            className={`w-full p-3 rounded-xl text-left transition-all ${
+                              selectedGoogleAdsAccountId === account.id
+                                ? 'bg-[var(--accent-violet)]/10 border-2 border-[var(--accent-violet)]'
+                                : 'bg-[var(--bg-tertiary)] border-2 border-transparent hover:border-[var(--border-default)]'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className={`text-sm font-medium ${
+                                selectedGoogleAdsAccountId === account.id ? 'text-[var(--accent-violet)]' : 'text-[var(--text-primary)]'
+                              }`}>
+                                {account.name}
+                              </span>
+                              {account.customerId === 'ALL' && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--accent-electric)]/20 text-[var(--accent-electric)]">
+                                  All
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-[var(--text-muted)] mt-1 font-mono">
+                              {account.customerId === 'ALL' ? 'Check all accounts' : account.customerId}
+                            </p>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* Country Selection */}
                   <div>
@@ -941,12 +950,14 @@ export default function Home() {
                         {DATA_SOURCE_OPTIONS.find(o => o.value === dataSource)?.label}
                       </span>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-[var(--text-muted)]">Account:</span>
-                      <span className="text-xs font-medium text-[var(--accent-violet)]">
-                        {GOOGLE_ADS_ACCOUNTS.find(a => a.id === selectedGoogleAdsAccountId)?.name}
-                      </span>
-                    </div>
+                    {dataSource !== 'keywords_everywhere' && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-[var(--text-muted)]">Account:</span>
+                        <span className="text-xs font-medium text-[var(--accent-violet)]">
+                          {GOOGLE_ADS_ACCOUNTS.find(a => a.id === selectedGoogleAdsAccountId)?.name}
+                        </span>
+                      </div>
+                    )}
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-[var(--text-muted)]">Region:</span>
                       <span className="text-xs font-medium text-[var(--accent-lime)]">

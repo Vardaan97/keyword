@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId, GOOGLE_ADS_ACCOUNTS, getAccountName } from '@/lib/google-ads'
+import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId, GOOGLE_ADS_ACCOUNTS, getAccountName, getRealAccountIds } from '@/lib/google-ads'
 import { getKeywordData, getRelatedKeywords, getKeywordsEverywhereConfig, CountryCode } from '@/lib/keywords-everywhere'
 import { getCachedKeywords, setCachedKeywords, getDatabaseStatus, UnifiedKeywordData } from '@/lib/database'
 import { KeywordIdea, ApiResponse } from '@/types'
@@ -178,14 +178,24 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
   const { seedKeywords, geoTarget = 'india', source = 'auto', skipCache = false, accountId } = body
 
   // Resolve customer ID from accountId or use default
+  // Special handling for "ALL" - will check all accounts
   let customerId = getDefaultCustomerId()
   let accountName = getAccountName(customerId)
+  let checkAllAccounts = false
+  let allAccountIds: string[] = []
 
   if (accountId) {
     const account = GOOGLE_ADS_ACCOUNTS.find(acc => acc.id === accountId)
     if (account) {
-      customerId = account.customerId
-      accountName = account.name
+      if (account.customerId === 'ALL') {
+        checkAllAccounts = true
+        allAccountIds = getRealAccountIds()
+        accountName = 'All Accounts'
+        customerId = allAccountIds[0] // Use first account for keyword generation
+      } else {
+        customerId = account.customerId
+        accountName = account.name
+      }
     }
   }
 
@@ -194,7 +204,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
   console.log('[FETCH-IDEAS] Geo Target:', geoTarget)
   console.log('[FETCH-IDEAS] Source:', source)
   console.log('[FETCH-IDEAS] Skip Cache:', skipCache)
-  console.log('[FETCH-IDEAS] Account:', accountName, '(', customerId, ')')
+  console.log('[FETCH-IDEAS] Account:', accountName, checkAllAccounts ? `(checking ${allAccountIds.length} accounts)` : `(${customerId})`)
 
   if (!seedKeywords || seedKeywords.length === 0) {
     console.log('[FETCH-IDEAS] Error: No seed keywords provided')
@@ -314,7 +324,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     const keywordIdeas = await getKeywordIdeas(config, {
       customerId,
       seedKeywords,
-      geoTargetConstants: [geoTargetConstant]
+      geoTargetConstants: [geoTargetConstant],
+      checkAllAccounts,
+      allAccountIds
     })
 
     const processingTimeMs = Date.now() - startTime

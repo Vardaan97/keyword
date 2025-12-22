@@ -18,10 +18,18 @@ export interface GoogleAdsAccount {
 // Available accounts under the MCC (Manager account)
 // These are the sub-accounts accessible via the login customer ID
 export const GOOGLE_ADS_ACCOUNTS: GoogleAdsAccount[] = [
-  { id: 'koenig-main', name: 'Koenig Solutions', customerId: '3515012934' },
+  { id: 'all-accounts', name: 'All Accounts', customerId: 'ALL' },  // Special option to check all accounts
+  { id: 'flexi', name: 'Flexi', customerId: '3515012934' },
   { id: 'bouquet-inr', name: 'Bouquet INR', customerId: '6153038296' },
   { id: 'bouquet-inr-2', name: 'Bouquet INR - 2', customerId: '6601080005' }
 ]
+
+// Get all real account IDs (excluding the "ALL" option)
+export function getRealAccountIds(): string[] {
+  return GOOGLE_ADS_ACCOUNTS
+    .filter(acc => acc.customerId !== 'ALL')
+    .map(acc => acc.customerId)
+}
 
 interface GoogleAdsConfig {
   developerToken: string
@@ -37,6 +45,8 @@ interface KeywordPlannerRequest {
   pageUrl?: string
   geoTargetConstants?: string[]
   language?: string
+  checkAllAccounts?: boolean  // If true, check "in account" against all accounts
+  allAccountIds?: string[]    // List of all account IDs to check against
 }
 
 /**
@@ -130,14 +140,33 @@ export async function getKeywordIdeas(
   console.log('[GOOGLE-ADS] API Version:', GOOGLE_ADS_API_VERSION)
   console.log('[GOOGLE-ADS] Seeds:', request.seedKeywords)
   console.log('[GOOGLE-ADS] Geo Targets:', request.geoTargetConstants)
+  console.log('[GOOGLE-ADS] Check All Accounts:', request.checkAllAccounts || false)
 
-  // Fetch account keywords in parallel with the access token
-  const [accessToken, accountKeywords] = await Promise.all([
-    getAccessToken(config),
-    getAccountKeywords(config, request.customerId)
-  ])
+  // Fetch account keywords - either from single account or all accounts
+  let accountKeywords: Set<string>
+  const accessToken = await getAccessToken(config)
+
+  if (request.checkAllAccounts && request.allAccountIds && request.allAccountIds.length > 0) {
+    // Fetch keywords from all accounts in parallel and combine them
+    console.log(`[GOOGLE-ADS] Fetching keywords from ${request.allAccountIds.length} accounts...`)
+    const allKeywordSets = await Promise.all(
+      request.allAccountIds.map(accId => getAccountKeywords(config, accId))
+    )
+    // Combine all keywords into a single set
+    accountKeywords = new Set<string>()
+    for (const kwSet of allKeywordSets) {
+      for (const kw of kwSet) {
+        accountKeywords.add(kw)
+      }
+    }
+    console.log('[GOOGLE-ADS] Combined keywords from all accounts:', accountKeywords.size, 'unique keywords')
+  } else {
+    // Single account mode
+    accountKeywords = await getAccountKeywords(config, request.customerId)
+    console.log('[GOOGLE-ADS] Account keywords loaded:', accountKeywords.size, 'keywords')
+  }
+
   console.log('[GOOGLE-ADS] Access token obtained successfully')
-  console.log('[GOOGLE-ADS] Account keywords loaded:', accountKeywords.size, 'keywords')
 
   const customerId = request.customerId.replace(/-/g, '')
   const loginCustomerId = config.loginCustomerId.replace(/-/g, '')
