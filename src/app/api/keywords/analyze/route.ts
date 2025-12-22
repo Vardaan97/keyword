@@ -189,51 +189,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
               messages: [
                 {
                   role: 'system',
-                  content: `You are a Google Ads keyword strategist for Koenig Solutions, analyzing keywords for IT training courses.
+                  content: `You are a keyword analysis expert. Follow the user's instructions exactly.
 
-Output your analysis as a valid JSON object with this exact structure:
-{
-  "analyzedKeywords": [
-    {
-      "keyword": "...",
-      "avgMonthlySearches": number,
-      "competition": "LOW|MEDIUM|HIGH|UNSPECIFIED",
-      "competitionIndex": number,
-      "courseRelevance": number (0-10),
-      "relevanceStatus": "EXACT_MATCH|DIRECT_RELATED|STRONGLY_RELATED|RELATED|LOOSELY_RELATED|TANGENTIAL|WEAK_CONNECTION|DIFFERENT_PRODUCT|DIFFERENT_VENDOR|NOT_RELEVANT",
-      "conversionPotential": number (0-10),
-      "searchIntent": number (0-10),
-      "vendorSpecificity": number (0-10),
-      "keywordSpecificity": number (0-10),
-      "actionWordStrength": number (0-10),
-      "commercialSignals": number (0-10),
-      "negativeSignals": number (0-10),
-      "koenigFit": number (0-10),
-      "baseScore": number (0-100),
-      "competitionBonus": number (10 for Low, 5 for Medium, 0 for High),
-      "finalScore": number (0-100),
-      "tier": "Tier 1|Tier 2|Tier 3|Tier 4|Review|Exclude",
-      "matchType": "[EXACT]|PHRASE|BROAD|N/A",
-      "action": "ADD|BOOST|MONITOR|OPTIMIZE|REVIEW|EXCLUDE|EXCLUDE_RELEVANCE",
-      "exclusionReason": "..." (only if action is EXCLUDE or EXCLUDE_RELEVANCE),
-      "priority": "🔴 URGENT|🟠 HIGH|🟡 MEDIUM|⚪ STANDARD|🔵 REVIEW" (only for ADD action)
-    }
-  ],
-  "summary": {
-    "totalAnalyzed": number,
-    "toAdd": number,
-    "toReview": number,
-    "excluded": number,
-    "urgentCount": number,
-    "highPriorityCount": number
-  }
-}
-
-IMPORTANT INSTRUCTIONS:
-1. Return ONLY the JSON object - no markdown formatting, no code blocks, no explanations
+CRITICAL OUTPUT REQUIREMENTS:
+1. Return ONLY valid JSON - no markdown, no code blocks, no explanations before or after
 2. Analyze ALL ${batchKeywords.length} keywords provided - do not skip any
-3. Ensure the JSON is valid and complete
-4. Include the summary object with accurate counts`
+3. Ensure the JSON is complete and properly formatted`
                 },
                 {
                   role: 'user',
