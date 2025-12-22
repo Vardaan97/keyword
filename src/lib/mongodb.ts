@@ -8,12 +8,58 @@ import { MongoClient, Db, Collection, ObjectId } from 'mongodb'
 const MONGODB_URI = process.env.MONGODB_URI || ''
 const DB_NAME = 'keyword_planner'
 
+// Use global to persist connection across serverless function invocations
+declare global {
+  // eslint-disable-next-line no-var
+  var _mongoClientPromise: Promise<MongoClient> | undefined
+}
+
 let client: MongoClient | null = null
 let db: Db | null = null
+let clientPromise: Promise<MongoClient> | null = null
 
 // Check if MongoDB is configured
 export function isMongoConfigured(): boolean {
   return !!MONGODB_URI
+}
+
+// MongoDB connection options optimized for serverless (Vercel)
+const mongoOptions = {
+  // TLS/SSL configuration - required for MongoDB Atlas
+  tls: true,
+  tlsAllowInvalidCertificates: false,
+  // Connection pool settings for serverless
+  maxPoolSize: 10,
+  minPoolSize: 0,
+  maxIdleTimeMS: 10000,
+  // Timeout settings
+  serverSelectionTimeoutMS: 10000,
+  connectTimeoutMS: 10000,
+  socketTimeoutMS: 45000,
+  // Retry settings
+  retryWrites: true,
+  retryReads: true,
+}
+
+// Initialize MongoDB client with connection caching for serverless
+function getMongoClientPromise(): Promise<MongoClient> | null {
+  if (!MONGODB_URI) return null
+
+  // In development, use a global variable to preserve the connection across HMR
+  if (process.env.NODE_ENV === 'development') {
+    if (!global._mongoClientPromise) {
+      client = new MongoClient(MONGODB_URI, mongoOptions)
+      global._mongoClientPromise = client.connect()
+    }
+    return global._mongoClientPromise
+  }
+
+  // In production, create a new promise if we don't have one
+  if (!clientPromise) {
+    client = new MongoClient(MONGODB_URI, mongoOptions)
+    clientPromise = client.connect()
+  }
+  return clientPromise
 }
 
 async function getDb(): Promise<Db | null> {
@@ -24,13 +70,22 @@ async function getDb(): Promise<Db | null> {
   if (db) return db
 
   try {
-    client = new MongoClient(MONGODB_URI)
-    await client.connect()
-    db = client.db(DB_NAME)
+    const promise = getMongoClientPromise()
+    if (!promise) return null
+
+    const mongoClient = await promise
+    db = mongoClient.db(DB_NAME)
     console.log('[MONGODB] Connected successfully')
     return db
   } catch (error) {
     console.error('[MONGODB] Connection failed:', error)
+    // Reset connection state on failure to allow retry
+    client = null
+    db = null
+    clientPromise = null
+    if (process.env.NODE_ENV === 'development') {
+      global._mongoClientPromise = undefined
+    }
     return null
   }
 }

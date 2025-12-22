@@ -26,8 +26,77 @@ interface AnalysisResponse {
 }
 
 // Max keywords per batch (to stay within token limits)
-// ~150 keywords generates ~6000 output tokens which is safe for most models
-const MAX_KEYWORDS_PER_BATCH = 150
+// ~100 keywords for more reliable JSON output
+const MAX_KEYWORDS_PER_BATCH = 100
+
+/**
+ * Attempt to repair malformed JSON from AI responses
+ * Handles common issues like truncated arrays, missing brackets, trailing commas
+ */
+function repairJson(jsonString: string): string {
+  let repaired = jsonString.trim()
+
+  // Remove any markdown code blocks
+  repaired = repaired.replace(/^```json?\s*/i, '').replace(/\s*```$/i, '')
+
+  // Fix trailing commas before closing brackets
+  repaired = repaired.replace(/,(\s*[\]}])/g, '$1')
+
+  // Count brackets to check for truncation
+  const openBraces = (repaired.match(/\{/g) || []).length
+  const closeBraces = (repaired.match(/\}/g) || []).length
+  const openBrackets = (repaired.match(/\[/g) || []).length
+  const closeBrackets = (repaired.match(/\]/g) || []).length
+
+  // If array is truncated (missing closing brackets), try to close it
+  if (openBrackets > closeBrackets) {
+    // Find the last complete object in the array
+    const lastCompleteObjectMatch = repaired.match(/.*\}(?=\s*,?\s*$)/s)
+    if (lastCompleteObjectMatch) {
+      const lastIndex = repaired.lastIndexOf('}')
+      if (lastIndex !== -1) {
+        // Truncate to last complete object and close the structure
+        repaired = repaired.substring(0, lastIndex + 1)
+        // Add missing closing brackets and braces
+        const missingBrackets = openBrackets - (repaired.match(/\]/g) || []).length
+        const missingBraces = openBraces - (repaired.match(/\}/g) || []).length
+        repaired += ']'.repeat(missingBrackets)
+        repaired += '}'.repeat(missingBraces)
+      }
+    }
+  }
+
+  // If still unbalanced, try a more aggressive fix
+  if (openBraces !== (repaired.match(/\}/g) || []).length ||
+      openBrackets !== (repaired.match(/\]/g) || []).length) {
+    // Try to find and extract just the analyzedKeywords array
+    const arrayMatch = repaired.match(/"analyzedKeywords"\s*:\s*\[([\s\S]*)/i)
+    if (arrayMatch) {
+      let arrayContent = arrayMatch[1]
+      // Find all complete objects in the array
+      const objects: string[] = []
+      let depth = 0
+      let start = -1
+      for (let i = 0; i < arrayContent.length; i++) {
+        if (arrayContent[i] === '{') {
+          if (depth === 0) start = i
+          depth++
+        } else if (arrayContent[i] === '}') {
+          depth--
+          if (depth === 0 && start !== -1) {
+            objects.push(arrayContent.substring(start, i + 1))
+            start = -1
+          }
+        }
+      }
+      if (objects.length > 0) {
+        repaired = `{"analyzedKeywords":[${objects.join(',')}]}`
+      }
+    }
+  }
+
+  return repaired
+}
 
 export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<AnalysisResponse>>> {
   const startTime = Date.now()
@@ -131,18 +200,34 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. A
           console.log(`[ANALYZE] ${batchLabel} Response from ${result.provider} (${result.model})`)
           console.log(`[ANALYZE] ${batchLabel} Response: ${responseText.length} chars, ${result.tokensUsed || 'N/A'} tokens`)
 
-          // Parse JSON response
+          // Parse JSON response with repair fallback
           let analysisResult
           try {
             analysisResult = JSON.parse(responseText)
           } catch (parseError) {
-            // Try to extract JSON from response (sometimes models wrap in markdown)
-            const jsonMatch = responseText.match(/\{[\s\S]*\}/)
-            if (jsonMatch) {
-              console.log(`[ANALYZE] ${batchLabel} Extracted JSON from response`)
-              analysisResult = JSON.parse(jsonMatch[0])
-            } else {
-              throw new Error(`Failed to parse AI response as JSON: ${responseText.substring(0, 200)}...`)
+            console.log(`[ANALYZE] ${batchLabel} Initial JSON parse failed, attempting repair...`)
+
+            // Try to repair the JSON
+            const repairedJson = repairJson(responseText)
+            try {
+              analysisResult = JSON.parse(repairedJson)
+              console.log(`[ANALYZE] ${batchLabel} JSON repair successful`)
+            } catch (repairError) {
+              // Last resort: try to extract JSON from response (sometimes models wrap in markdown)
+              const jsonMatch = responseText.match(/\{[\s\S]*\}/)
+              if (jsonMatch) {
+                const extracted = repairJson(jsonMatch[0])
+                try {
+                  analysisResult = JSON.parse(extracted)
+                  console.log(`[ANALYZE] ${batchLabel} Extracted and repaired JSON from response`)
+                } catch (extractError) {
+                  console.error(`[ANALYZE] ${batchLabel} All JSON parsing attempts failed`)
+                  console.error(`[ANALYZE] ${batchLabel} Response preview: ${responseText.substring(0, 500)}...`)
+                  throw new Error(`Failed to parse AI response as JSON after repair attempts`)
+                }
+              } else {
+                throw new Error(`Failed to parse AI response as JSON: ${responseText.substring(0, 200)}...`)
+              }
             }
           }
 
