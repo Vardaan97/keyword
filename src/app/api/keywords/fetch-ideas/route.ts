@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId, GOOGLE_ADS_ACCOUNTS, getAccountName, getRealAccountIds } from '@/lib/google-ads'
 import { getKeywordData, getRelatedKeywords, getKeywordsEverywhereConfig, CountryCode } from '@/lib/keywords-everywhere'
-import { getCachedKeywords, setCachedKeywords, getDatabaseStatus, UnifiedKeywordData } from '@/lib/database'
+import { getCachedKeywords, setCachedKeywords, getDatabaseStatus, UnifiedKeywordData, saveKeywordVolumes } from '@/lib/database'
 import { KeywordIdea, ApiResponse } from '@/types'
 
 interface FetchIdeasRequest {
@@ -245,7 +245,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     }
   }
 
-  // Helper function to cache results (writes to both Supabase and MongoDB)
+  // Helper function to cache results (writes to both seeds-based cache and individual volume cache)
   const cacheResults = async (keywords: KeywordIdea[], actualSource: string) => {
     if (!dbStatus.hasAnyDatabase) return
     try {
@@ -257,7 +257,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
         highTopOfPageBidMicros: kw.highTopOfPageBidMicros
       }))
+
+      // Save to seeds-based cache (48 hour TTL)
       await setCachedKeywords(seedKeywords, geoTarget, actualSource, keywordData)
+
+      // Also save individual keyword volumes for future lookups (7 day TTL)
+      // This allows reusing volume data across different seed keyword searches
+      const volumeSource = actualSource === 'google_ads' ? 'google_ads' : 'keywords_everywhere'
+      const savedCount = await saveKeywordVolumes(keywordData, geoTarget, volumeSource as 'google_ads' | 'keywords_everywhere', 7)
+      console.log(`[FETCH-IDEAS] Saved ${savedCount} keyword volumes to cache`)
     } catch (err) {
       console.log('[FETCH-IDEAS] Failed to cache results:', err)
     }

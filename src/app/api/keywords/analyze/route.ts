@@ -25,15 +25,23 @@ interface AnalysisResponse {
   }
 }
 
+// Max keywords per batch (to stay within token limits)
+// ~150 keywords generates ~6000 output tokens which is safe for most models
+const MAX_KEYWORDS_PER_BATCH = 150
+
 export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<AnalysisResponse>>> {
+  const startTime = Date.now()
+
   try {
     const body: AnalyzeRequest = await request.json()
     const { prompt, courseName, certificationCode, vendor, relatedTerms, keywords, aiProvider } = body
 
+    console.log('[ANALYZE] ========================================')
     console.log('[ANALYZE] Request received')
     console.log('[ANALYZE] Course:', courseName)
     console.log('[ANALYZE] Keywords count:', keywords?.length)
     console.log('[ANALYZE] AI Provider:', aiProvider || 'default')
+    console.log('[ANALYZE] ========================================')
 
     if (!prompt || !courseName || !keywords || keywords.length === 0) {
       console.log('[ANALYZE] Error: Missing required fields')
@@ -43,37 +51,38 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       }, { status: 400 })
     }
 
-    // Format keywords data for the prompt - process all at once
-    const keywordsData = keywords.map(kw =>
-      `${kw.keyword},${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex}`
-    ).join('\n')
-
-    const keywordsHeader = 'Keyword,Avg Monthly Searches,Competition,Competition Index'
-    const formattedKeywords = `${keywordsHeader}\n${keywordsData}`
-
-    // Fill in the prompt variables
-    const filledPrompt = fillPromptVariables(prompt, {
-      COURSE_NAME: courseName,
-      CERTIFICATION_CODE: certificationCode || 'N/A',
-      VENDOR: vendor || 'Not specified',
-      RELATED_TERMS: relatedTerms || courseName,
-      KEYWORDS_DATA: formattedKeywords
-    })
-
-    console.log('[ANALYZE] Processing all', keywords.length, 'keywords in a single request')
-
-    // Analyze all keywords in a single API call
-    const analyzeAllKeywords = async (retryCount = 0): Promise<AnalyzedKeyword[]> => {
+    // Process function for a batch of keywords
+    const processBatch = async (batchKeywords: KeywordIdea[], batchIndex: number, totalBatches: number): Promise<AnalyzedKeyword[]> => {
       const MAX_RETRIES = 2
-      console.log('[ANALYZE] Sending request to AI...', retryCount > 0 ? `[Retry ${retryCount}]` : '')
 
-      try {
-        const result = await aiClient.chatCompletionWithFallback(
-          {
-            messages: [
-              {
-                role: 'system',
-                content: `You are a Google Ads keyword strategist for Koenig Solutions, analyzing keywords for IT training courses.
+      // Format keywords data for the prompt
+      const keywordsData = batchKeywords.map(kw =>
+        `${kw.keyword},${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex}`
+      ).join('\n')
+
+      const keywordsHeader = 'Keyword,Avg Monthly Searches,Competition,Competition Index'
+      const formattedKeywords = `${keywordsHeader}\n${keywordsData}`
+
+      // Fill in the prompt variables
+      const filledPrompt = fillPromptVariables(prompt, {
+        COURSE_NAME: courseName,
+        CERTIFICATION_CODE: certificationCode || 'N/A',
+        VENDOR: vendor || 'Not specified',
+        RELATED_TERMS: relatedTerms || courseName,
+        KEYWORDS_DATA: formattedKeywords
+      })
+
+      const attemptAnalysis = async (retryCount = 0): Promise<AnalyzedKeyword[]> => {
+        const batchLabel = totalBatches > 1 ? `[Batch ${batchIndex + 1}/${totalBatches}]` : ''
+        console.log(`[ANALYZE] ${batchLabel} Sending ${batchKeywords.length} keywords to AI...`, retryCount > 0 ? `[Retry ${retryCount}]` : '')
+
+        try {
+          const result = await aiClient.chatCompletionWithFallback(
+            {
+              messages: [
+                {
+                  role: 'system',
+                  content: `You are a Google Ads keyword strategist for Koenig Solutions, analyzing keywords for IT training courses.
 
 Output your analysis as a valid JSON object with this exact structure:
 {
@@ -104,92 +113,130 @@ Each keyword in analyzedKeywords should have these fields:
 - exclusionReason (string, only if excluded)
 - priority (string with emoji: "🔴 URGENT" | "🟠 HIGH" | "🟡 MEDIUM" | "⚪ STANDARD" | "🔵 REVIEW", only for ADD action)
 
-IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. Analyze ALL ${keywords.length} keywords provided.`
-              },
-              {
-                role: 'user',
-                content: filledPrompt
-              }
-            ],
-            temperature: 0.3,
-            maxTokens: 65000, // Increased for larger responses
-            jsonMode: true
-          },
-          { provider: aiProvider }
-        )
+IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. Analyze ALL ${batchKeywords.length} keywords provided.`
+                },
+                {
+                  role: 'user',
+                  content: filledPrompt
+                }
+              ],
+              temperature: 0.3,
+              maxTokens: 8192, // Safe limit for most models (Gemini Flash, GPT-4o)
+              jsonMode: true
+            },
+            { provider: aiProvider }
+          )
 
-        const responseText = result.content
-        console.log('[ANALYZE] Response from', result.provider, '(', result.model, ')')
-        console.log('[ANALYZE] Response length:', responseText.length, 'chars')
-        console.log('[ANALYZE] Tokens used:', result.tokensUsed)
+          const responseText = result.content
+          console.log(`[ANALYZE] ${batchLabel} Response from ${result.provider} (${result.model})`)
+          console.log(`[ANALYZE] ${batchLabel} Response: ${responseText.length} chars, ${result.tokensUsed || 'N/A'} tokens`)
 
-        const analysisResult = JSON.parse(responseText)
-        console.log('[ANALYZE] Parsed successfully,', analysisResult.analyzedKeywords?.length || 0, 'keywords')
+          // Parse JSON response
+          let analysisResult
+          try {
+            analysisResult = JSON.parse(responseText)
+          } catch (parseError) {
+            // Try to extract JSON from response (sometimes models wrap in markdown)
+            const jsonMatch = responseText.match(/\{[\s\S]*\}/)
+            if (jsonMatch) {
+              console.log(`[ANALYZE] ${batchLabel} Extracted JSON from response`)
+              analysisResult = JSON.parse(jsonMatch[0])
+            } else {
+              throw new Error(`Failed to parse AI response as JSON: ${responseText.substring(0, 200)}...`)
+            }
+          }
 
-        if (analysisResult.analyzedKeywords && Array.isArray(analysisResult.analyzedKeywords)) {
-          return analysisResult.analyzedKeywords.map((analyzed: Partial<AnalyzedKeyword>) => {
-            const original = keywords.find(k =>
-              k.keyword.toLowerCase() === analyzed.keyword?.toLowerCase()
-            )
-            return {
-              keyword: analyzed.keyword || '',
-              avgMonthlySearches: original?.avgMonthlySearches || analyzed.avgMonthlySearches || 0,
-              competition: original?.competition || analyzed.competition || 'UNSPECIFIED',
-              competitionIndex: original?.competitionIndex || analyzed.competitionIndex || 0,
-              lowTopOfPageBidMicros: original?.lowTopOfPageBidMicros,
-              highTopOfPageBidMicros: original?.highTopOfPageBidMicros,
-              inAccount: original?.inAccount,
-              courseRelevance: analyzed.courseRelevance || 0,
-              relevanceStatus: analyzed.relevanceStatus || 'NOT_RELEVANT',
-              conversionPotential: analyzed.conversionPotential || 0,
-              searchIntent: analyzed.searchIntent || 0,
-              vendorSpecificity: analyzed.vendorSpecificity || 0,
-              keywordSpecificity: analyzed.keywordSpecificity || 0,
-              actionWordStrength: analyzed.actionWordStrength || 0,
-              commercialSignals: analyzed.commercialSignals || 0,
-              negativeSignals: analyzed.negativeSignals || 10,
-              koenigFit: analyzed.koenigFit || 0,
-              baseScore: analyzed.baseScore || 0,
-              competitionBonus: analyzed.competitionBonus || 0,
-              finalScore: analyzed.finalScore || 0,
-              tier: analyzed.tier || 'Exclude',
-              matchType: analyzed.matchType || 'N/A',
-              action: analyzed.action || 'EXCLUDE',
-              exclusionReason: analyzed.exclusionReason,
-              priority: analyzed.priority
-            } as AnalyzedKeyword
-          })
+          const analyzedCount = analysisResult.analyzedKeywords?.length || 0
+          console.log(`[ANALYZE] ${batchLabel} Parsed ${analyzedCount} keywords`)
+
+          if (analysisResult.analyzedKeywords && Array.isArray(analysisResult.analyzedKeywords)) {
+            return analysisResult.analyzedKeywords.map((analyzed: Partial<AnalyzedKeyword>) => {
+              const original = batchKeywords.find(k =>
+                k.keyword.toLowerCase() === analyzed.keyword?.toLowerCase()
+              )
+              return {
+                keyword: analyzed.keyword || '',
+                avgMonthlySearches: original?.avgMonthlySearches || analyzed.avgMonthlySearches || 0,
+                competition: original?.competition || analyzed.competition || 'UNSPECIFIED',
+                competitionIndex: original?.competitionIndex || analyzed.competitionIndex || 0,
+                lowTopOfPageBidMicros: original?.lowTopOfPageBidMicros,
+                highTopOfPageBidMicros: original?.highTopOfPageBidMicros,
+                inAccount: original?.inAccount,
+                courseRelevance: analyzed.courseRelevance || 0,
+                relevanceStatus: analyzed.relevanceStatus || 'NOT_RELEVANT',
+                conversionPotential: analyzed.conversionPotential || 0,
+                searchIntent: analyzed.searchIntent || 0,
+                vendorSpecificity: analyzed.vendorSpecificity || 0,
+                keywordSpecificity: analyzed.keywordSpecificity || 0,
+                actionWordStrength: analyzed.actionWordStrength || 0,
+                commercialSignals: analyzed.commercialSignals || 0,
+                negativeSignals: analyzed.negativeSignals || 10,
+                koenigFit: analyzed.koenigFit || 0,
+                baseScore: analyzed.baseScore || 0,
+                competitionBonus: analyzed.competitionBonus || 0,
+                finalScore: analyzed.finalScore || 0,
+                tier: analyzed.tier || 'Exclude',
+                matchType: analyzed.matchType || 'N/A',
+                action: analyzed.action || 'EXCLUDE',
+                exclusionReason: analyzed.exclusionReason,
+                priority: analyzed.priority
+              } as AnalyzedKeyword
+            })
+          }
+
+          console.warn(`[ANALYZE] ${batchLabel} No analyzedKeywords array in response`)
+          return []
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error)
+          console.error(`[ANALYZE] ${batchLabel} Error:`, errorMessage)
+
+          // Retry on failure
+          if (retryCount < MAX_RETRIES) {
+            const delay = (retryCount + 1) * 2000 // Exponential backoff: 2s, 4s
+            console.log(`[ANALYZE] ${batchLabel} Retrying in ${delay / 1000}s...`)
+            await new Promise(resolve => setTimeout(resolve, delay))
+            return attemptAnalysis(retryCount + 1)
+          }
+
+          console.error(`[ANALYZE] ${batchLabel} Failed after ${MAX_RETRIES} retries`)
+          throw new Error(`Analysis failed for batch ${batchIndex + 1}: ${errorMessage}`)
         }
-        return []
-      } catch (error) {
-        console.error('[ANALYZE] Error:', error)
-
-        // Retry on failure
-        if (retryCount < MAX_RETRIES) {
-          console.log('[ANALYZE] Retrying in 2 seconds...')
-          await new Promise(resolve => setTimeout(resolve, 2000))
-          return analyzeAllKeywords(retryCount + 1)
-        }
-
-        console.error('[ANALYZE] Failed after', MAX_RETRIES, 'retries')
-        throw error
       }
+
+      return attemptAnalysis()
     }
 
-    const allAnalyzedKeywords = await analyzeAllKeywords()
+    // Split keywords into batches if needed
+    const batches: KeywordIdea[][] = []
+    for (let i = 0; i < keywords.length; i += MAX_KEYWORDS_PER_BATCH) {
+      batches.push(keywords.slice(i, i + MAX_KEYWORDS_PER_BATCH))
+    }
+
+    console.log(`[ANALYZE] Processing ${keywords.length} keywords in ${batches.length} batch(es)`)
+
+    // Process batches (parallel for speed, but limit to 2 concurrent to avoid rate limits)
+    const allAnalyzedKeywords: AnalyzedKeyword[] = []
+    const CONCURRENT_BATCHES = 2
+
+    for (let i = 0; i < batches.length; i += CONCURRENT_BATCHES) {
+      const batchChunk = batches.slice(i, i + CONCURRENT_BATCHES)
+      const results = await Promise.all(
+        batchChunk.map((batch, idx) => processBatch(batch, i + idx, batches.length))
+      )
+      results.forEach(result => allAnalyzedKeywords.push(...result))
+    }
 
     // If no keywords were analyzed, return error
     if (allAnalyzedKeywords.length === 0) {
-      console.error('[ANALYZE] No keywords were analyzed successfully')
+      const processingTimeMs = Date.now() - startTime
+      console.error(`[ANALYZE] No keywords analyzed after ${processingTimeMs}ms`)
       return NextResponse.json({
         success: false,
-        error: 'Failed to analyze any keywords'
+        error: 'AI analysis returned no results. Please try again or use a different AI provider.'
       }, { status: 500 })
     }
 
-    console.log('[ANALYZE] Total analyzed:', allAnalyzedKeywords.length, 'keywords')
-
-    // Calculate summary from all analyzed keywords
+    // Calculate summary
     const summary = {
       totalAnalyzed: allAnalyzedKeywords.length,
       toAdd: allAnalyzedKeywords.filter(k => k.action === 'ADD').length,
@@ -199,21 +246,36 @@ IMPORTANT: Return ONLY the JSON object, no markdown formatting or code blocks. A
       highPriorityCount: allAnalyzedKeywords.filter(k => k.priority === '🟠 HIGH').length
     }
 
-    console.log(`[ANALYZE] Complete: ${allAnalyzedKeywords.length} keywords analyzed`)
+    const processingTimeMs = Date.now() - startTime
+    console.log('[ANALYZE] ========================================')
+    console.log(`[ANALYZE] COMPLETE: ${allAnalyzedKeywords.length} keywords in ${processingTimeMs}ms`)
+    console.log(`[ANALYZE] Summary: ${summary.toAdd} ADD, ${summary.toReview} REVIEW, ${summary.excluded} EXCLUDE`)
+    console.log('[ANALYZE] ========================================')
 
     return NextResponse.json({
       success: true,
       data: {
         analyzedKeywords: allAnalyzedKeywords,
         summary
+      },
+      meta: {
+        processingTimeMs,
+        batchCount: batches.length,
+        keywordsPerBatch: MAX_KEYWORDS_PER_BATCH
       }
     })
 
   } catch (error) {
-    console.error('Error analyzing keywords:', error)
+    const processingTimeMs = Date.now() - startTime
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
+    console.error('[ANALYZE] ========================================')
+    console.error(`[ANALYZE] FATAL ERROR after ${processingTimeMs}ms:`, errorMessage)
+    console.error('[ANALYZE] ========================================')
+
     return NextResponse.json({
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to analyze keywords'
+      error: `Analysis failed: ${errorMessage}`,
+      meta: { processingTimeMs }
     }, { status: 500 })
   }
 }

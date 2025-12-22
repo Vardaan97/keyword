@@ -19,6 +19,10 @@ import {
   setCachedKeywordsMongo,
   saveAnalysisMongo,
   getRecentAnalysesMongo,
+  getKeywordVolumesCached,
+  setKeywordVolumesCached,
+  getKeywordVolumeCacheStats,
+  cleanupExpiredKeywordVolumes,
   KeywordData
 } from './mongodb'
 
@@ -266,4 +270,90 @@ export async function getAllResearchSessions(limit = 50) {
   }
 
   return []
+}
+
+// ============================================================================
+// Individual Keyword Volume Cache (Smart Caching)
+// ============================================================================
+
+/**
+ * Get cached keyword volumes - returns cached data and list of missing keywords
+ * Use this to check cache before making API calls
+ */
+export async function getKeywordVolumes(
+  keywords: string[],
+  country: string,
+  source: 'google_ads' | 'keywords_everywhere'
+): Promise<{ cached: UnifiedKeywordData[]; missing: string[] }> {
+  if (!isMongoConfigured()) {
+    return { cached: [], missing: keywords }
+  }
+
+  try {
+    const result = await getKeywordVolumesCached(keywords, country, source)
+    return {
+      cached: result.cached.map(kw => ({
+        keyword: kw.keyword,
+        avgMonthlySearches: kw.avgMonthlySearches,
+        competition: kw.competition,
+        competitionIndex: kw.competitionIndex,
+        lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+        highTopOfPageBidMicros: kw.highTopOfPageBidMicros
+      })),
+      missing: result.missing
+    }
+  } catch (error) {
+    console.error('[DB] Get keyword volumes failed:', error)
+    return { cached: [], missing: keywords }
+  }
+}
+
+/**
+ * Save keyword volumes to cache
+ * Call this after fetching fresh data from APIs
+ */
+export async function saveKeywordVolumes(
+  keywords: UnifiedKeywordData[],
+  country: string,
+  source: 'google_ads' | 'keywords_everywhere',
+  ttlDays = 7
+): Promise<number> {
+  if (!isMongoConfigured()) {
+    return 0
+  }
+
+  try {
+    const keywordData: KeywordData[] = keywords.map(kw => ({
+      keyword: kw.keyword,
+      avgMonthlySearches: kw.avgMonthlySearches,
+      competition: kw.competition,
+      competitionIndex: kw.competitionIndex,
+      lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+      highTopOfPageBidMicros: kw.highTopOfPageBidMicros
+    }))
+    return await setKeywordVolumesCached(keywordData, country, source, ttlDays)
+  } catch (error) {
+    console.error('[DB] Save keyword volumes failed:', error)
+    return 0
+  }
+}
+
+/**
+ * Get cache statistics
+ */
+export async function getVolumeCacheStats() {
+  if (!isMongoConfigured()) {
+    return null
+  }
+  return await getKeywordVolumeCacheStats()
+}
+
+/**
+ * Cleanup expired cache entries
+ */
+export async function cleanupExpiredVolumes(): Promise<number> {
+  if (!isMongoConfigured()) {
+    return 0
+  }
+  return await cleanupExpiredKeywordVolumes()
 }
