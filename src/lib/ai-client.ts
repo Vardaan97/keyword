@@ -31,24 +31,26 @@ export interface ChatCompletionResult {
   model: string
 }
 
-// OpenRouter models - organized by use case
+// OpenRouter models - latest models with large context windows (Dec 2025)
 const OPENROUTER_MODELS = {
-  // Default: Gemini Flash - fast, cheap, 1M context, good JSON output
-  default: 'google/gemini-2.0-flash-001',
-  // Gemini models
-  gemini_flash: 'google/gemini-2.0-flash-001', // 1M context, 8K output
-  gemini_pro: 'google/gemini-2.5-pro-preview-06-05', // 1M context, 65K output
-  // OpenAI models
+  // Default: Gemini 2.5 Flash - 1M context, fast, cheap, excellent for JSON
+  default: 'google/gemini-2.5-flash',
+  // Latest Gemini models
+  gemini_flash: 'google/gemini-2.5-flash', // 1M context, $0.30/M input, $2.50/M output
+  gemini_pro: 'google/gemini-2.5-pro', // 1M context, best quality
+  // Latest OpenAI models
+  gpt5_mini: 'openai/gpt-5-mini', // 400K context, $0.25/M input, $2/M output
+  o4_mini: 'openai/o4-mini', // 200K context, reasoning model
   gpt4o: 'openai/gpt-4o', // 128K context
-  gpt4o_mini: 'openai/gpt-4o-mini', // 128K context, cheaper
+  gpt4o_mini: 'openai/gpt-4o-mini', // 128K context
   // Claude models (if needed)
   claude_sonnet: 'anthropic/claude-sonnet-4',
   claude_haiku: 'anthropic/claude-3-haiku',
 } as const
 
-// OpenAI models
+// OpenAI direct models
 const OPENAI_MODELS = {
-  default: 'gpt-4o-mini', // Use mini as default - cheaper and faster
+  default: 'gpt-4o-mini', // Use mini as default for direct OpenAI
   full: 'gpt-4o',
   mini: 'gpt-4o-mini',
 } as const
@@ -56,7 +58,7 @@ const OPENAI_MODELS = {
 // Default model selection based on provider
 const DEFAULT_MODELS: Record<AIProvider, string> = {
   openai: OPENAI_MODELS.default, // gpt-4o-mini
-  openrouter: OPENROUTER_MODELS.default, // gemini-2.0-flash
+  openrouter: OPENROUTER_MODELS.default, // gemini-2.5-flash (1M context)
 }
 
 class AIClient {
