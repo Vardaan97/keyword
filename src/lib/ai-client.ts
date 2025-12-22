@@ -33,10 +33,11 @@ export interface ChatCompletionResult {
 
 // OpenRouter models - latest models with large context windows (Dec 2025)
 const OPENROUTER_MODELS = {
-  // Default: Gemini 2.5 Flash - 1M context, fast, cheap, excellent for JSON
-  default: 'google/gemini-2.5-flash',
-  // Latest Gemini models
-  gemini_flash: 'google/gemini-2.5-flash', // 1M context, $0.30/M input, $2.50/M output
+  // Default: Gemini 3 Flash - 1M context, 65K output, frontier performance at Flash speed
+  default: 'google/gemini-3-flash-preview',
+  // Latest Gemini models (Dec 2025)
+  gemini_3_flash: 'google/gemini-3-flash-preview', // 1M context, 65K output, $0.50/M in, $3/M out
+  gemini_25_flash: 'google/gemini-2.5-flash', // 1M context, $0.30/M input, $2.50/M output
   gemini_pro: 'google/gemini-2.5-pro', // 1M context, best quality
   // Latest OpenAI models
   gpt5_mini: 'openai/gpt-5-mini', // 400K context, $0.25/M input, $2/M output
@@ -58,7 +59,7 @@ const OPENAI_MODELS = {
 // Default model selection based on provider
 const DEFAULT_MODELS: Record<AIProvider, string> = {
   openai: OPENAI_MODELS.default, // gpt-4o-mini
-  openrouter: OPENROUTER_MODELS.default, // gemini-2.5-flash (1M context)
+  openrouter: OPENROUTER_MODELS.default, // gemini-3-flash-preview (1M context, 65K output)
 }
 
 class AIClient {
