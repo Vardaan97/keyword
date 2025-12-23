@@ -7,6 +7,7 @@ import { KeywordIdea, ApiResponse } from '@/types'
 interface FetchIdeasRequest {
   seedKeywords: string[]
   pageUrl?: string
+  courseName?: string  // Course name for cache key
   geoTarget?: string
   source?: 'google' | 'keywords_everywhere' | 'auto' // Allow choosing data source
   skipCache?: boolean // Force fresh fetch
@@ -175,7 +176,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
 
   // Parse body outside try block so it's accessible in catch for fallback
   const body: FetchIdeasRequest = await request.json()
-  const { seedKeywords, geoTarget = 'india', source = 'auto', skipCache = false, accountId } = body
+  const { seedKeywords, pageUrl, courseName, geoTarget = 'india', source = 'auto', skipCache = false, accountId } = body
+
+  // Create a cache key that includes URL for better cache hits
+  // This allows reusing cached data when processing the same course URL again
+  const urlHash = pageUrl ? pageUrl.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 50) : ''
+  const courseHash = courseName ? courseName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30) : ''
 
   // Resolve customer ID from accountId or use default
   // Special handling for "ALL" - will check all accounts
@@ -215,37 +221,78 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
   }
 
   // Check cache first (unless skipCache is true)
+  // Try multiple cache keys for better hit rate:
+  // 1. URL-based key (best - same URL = same keywords)
+  // 2. Course name-based key
+  // 3. Seeds-based key (original)
   const dbStatus = getDatabaseStatus()
   if (!skipCache && dbStatus.hasAnyDatabase) {
+    // Try URL-based cache first (most specific)
+    const cacheKeys = [
+      urlHash ? `url_${urlHash}_${geoTarget}_${source}` : null,  // URL-based
+      courseHash ? `course_${courseHash}_${geoTarget}_${source}` : null,  // Course name-based
+    ].filter(Boolean) as string[]
+
+    for (const cacheKey of cacheKeys) {
+      try {
+        const cached = await getCachedKeywords([cacheKey], geoTarget, source)
+        if (cached && cached.length > 0) {
+          const processingTimeMs = Date.now() - startTime
+          console.log(`[FETCH-IDEAS] Cache hit (${cacheKey.split('_')[0]}-based)!`, cached.length, 'keywords in', processingTimeMs, 'ms')
+
+          // Convert to KeywordIdea with currency info
+          const keywordIdeas: KeywordIdea[] = cached.map(kw => ({
+            keyword: kw.keyword,
+            avgMonthlySearches: kw.avgMonthlySearches,
+            competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
+            competitionIndex: kw.competitionIndex,
+            lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+            highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+            bidCurrency: 'INR',  // Default to INR for cached data (all our accounts are INR)
+            inAccount: kw.inAccount
+          }))
+
+          return NextResponse.json({
+            success: true,
+            data: keywordIdeas,
+            meta: { source: 'cache', cached: true, processingTimeMs, databases: dbStatus, cacheKey: cacheKey.split('_')[0] }
+          })
+        }
+      } catch (cacheError) {
+        console.log(`[FETCH-IDEAS] Cache check (${cacheKey}) failed:`, cacheError)
+      }
+    }
+
+    // Fallback to seed-based cache
     try {
       const cached = await getCachedKeywords(seedKeywords, geoTarget, source)
       if (cached && cached.length > 0) {
         const processingTimeMs = Date.now() - startTime
-        console.log('[FETCH-IDEAS] Cache hit!', cached.length, 'keywords in', processingTimeMs, 'ms')
+        console.log('[FETCH-IDEAS] Cache hit (seeds-based)!', cached.length, 'keywords in', processingTimeMs, 'ms')
 
-        // Convert to KeywordIdea
         const keywordIdeas: KeywordIdea[] = cached.map(kw => ({
           keyword: kw.keyword,
           avgMonthlySearches: kw.avgMonthlySearches,
           competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
           competitionIndex: kw.competitionIndex,
           lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
-          highTopOfPageBidMicros: kw.highTopOfPageBidMicros
+          highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+          bidCurrency: 'INR',
+          inAccount: kw.inAccount
         }))
 
         return NextResponse.json({
           success: true,
           data: keywordIdeas,
-          meta: { source: 'cache', cached: true, processingTimeMs, databases: dbStatus }
+          meta: { source: 'cache', cached: true, processingTimeMs, databases: dbStatus, cacheKey: 'seeds' }
         })
       }
     } catch (cacheError) {
-      console.log('[FETCH-IDEAS] Cache check failed:', cacheError)
-      // Continue without cache
+      console.log('[FETCH-IDEAS] Seeds cache check failed:', cacheError)
     }
   }
 
-  // Helper function to cache results (writes to both seeds-based cache and individual volume cache)
+  // Helper function to cache results (writes to multiple cache keys for better hit rate)
   const cacheResults = async (keywords: KeywordIdea[], actualSource: string) => {
     if (!dbStatus.hasAnyDatabase) return
     try {
@@ -255,11 +302,24 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         competition: kw.competition,
         competitionIndex: kw.competitionIndex,
         lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
-        highTopOfPageBidMicros: kw.highTopOfPageBidMicros
+        highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+        inAccount: kw.inAccount
       }))
 
-      // Save to seeds-based cache (48 hour TTL)
-      await setCachedKeywords(seedKeywords, geoTarget, actualSource, keywordData)
+      // Save to seeds-based cache (7 day TTL)
+      await setCachedKeywords(seedKeywords, geoTarget, actualSource, keywordData, 168)
+
+      // Also save with URL-based key for better cache hits when same URL is processed again
+      if (urlHash) {
+        await setCachedKeywords([`url_${urlHash}_${geoTarget}_${actualSource}`], geoTarget, actualSource, keywordData)
+        console.log(`[FETCH-IDEAS] Saved URL-based cache: url_${urlHash.slice(0, 20)}...`)
+      }
+
+      // Save with course name-based key as well
+      if (courseHash) {
+        await setCachedKeywords([`course_${courseHash}_${geoTarget}_${actualSource}`], geoTarget, actualSource, keywordData)
+        console.log(`[FETCH-IDEAS] Saved course-based cache: course_${courseHash}`)
+      }
 
       // Also save individual keyword volumes for future lookups (7 day TTL)
       // This allows reusing volume data across different seed keyword searches

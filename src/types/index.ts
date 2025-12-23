@@ -21,7 +21,9 @@ export interface KeywordIdea {
   competitionIndex: number
   lowTopOfPageBidMicros?: number
   highTopOfPageBidMicros?: number
+  bidCurrency?: 'INR' | 'USD' | string  // Currency of the bid amounts
   inAccount?: boolean  // Whether keyword is already in Google Ads account
+  inAccountNames?: string[]  // Names of accounts containing this keyword
 }
 
 export interface AnalyzedKeyword extends KeywordIdea {

@@ -1,8 +1,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;500;600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
-:root {
-  /* Dark industrial theme with electric accents */
+:root,
+[data-theme="dark"] {
+  /* Dark industrial theme with electric accents (Default) */
   --bg-primary: #0a0a0b;
   --bg-secondary: #111113;
   --bg-tertiary: #18181b;
@@ -24,6 +25,84 @@
   --border-strong: rgba(255, 255, 255, 0.15);
 
   --shadow-glow: 0 0 60px rgba(34, 211, 238, 0.15);
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* Light Theme - Clean and minimal */
+[data-theme="light"] {
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f1f5f9;
+  --bg-elevated: #ffffff;
+  --bg-hover: #e2e8f0;
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+
+  --accent-electric: #0891b2;
+  --accent-lime: #65a30d;
+  --accent-amber: #d97706;
+  --accent-rose: #e11d48;
+  --accent-violet: #7c3aed;
+
+  --border-subtle: rgba(0, 0, 0, 0.04);
+  --border-default: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.12);
+
+  --shadow-glow: 0 0 60px rgba(8, 145, 178, 0.1);
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08);
+}
+
+/* Koenig Solutions Brand Theme - Red/Orange brand colors */
+[data-theme="koenig"] {
+  --bg-primary: #1a0a0a;
+  --bg-secondary: #1f1010;
+  --bg-tertiary: #2a1515;
+  --bg-elevated: #331a1a;
+  --bg-hover: #3d2020;
+
+  --text-primary: #fafafa;
+  --text-secondary: #d4a5a5;
+  --text-muted: #a07070;
+
+  --accent-electric: #ff6b35;  /* Koenig Orange */
+  --accent-lime: #ffc107;      /* Gold */
+  --accent-amber: #ff9800;
+  --accent-rose: #e91e63;      /* Koenig Red */
+  --accent-violet: #9c27b0;
+
+  --border-subtle: rgba(255, 107, 53, 0.08);
+  --border-default: rgba(255, 107, 53, 0.15);
+  --border-strong: rgba(255, 107, 53, 0.25);
+
+  --shadow-glow: 0 0 60px rgba(255, 107, 53, 0.2);
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* Blue Professional Theme */
+[data-theme="blue"] {
+  --bg-primary: #0c1929;
+  --bg-secondary: #0f2744;
+  --bg-tertiary: #14365e;
+  --bg-elevated: #1a4478;
+  --bg-hover: #205292;
+
+  --text-primary: #f0f9ff;
+  --text-secondary: #93c5fd;
+  --text-muted: #60a5fa;
+
+  --accent-electric: #38bdf8;  /* Sky blue */
+  --accent-lime: #34d399;      /* Emerald */
+  --accent-amber: #fbbf24;
+  --accent-rose: #f472b6;
+  --accent-violet: #a78bfa;
+
+  --border-subtle: rgba(56, 189, 248, 0.08);
+  --border-default: rgba(56, 189, 248, 0.15);
+  --border-strong: rgba(56, 189, 248, 0.25);
+
+  --shadow-glow: 0 0 60px rgba(56, 189, 248, 0.2);
   --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
 }
 

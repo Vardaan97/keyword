@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useCallback, useRef, useEffect } from "react"
-import { useAppStore, COUNTRY_OPTIONS, DATA_SOURCE_OPTIONS, DataSourceType, CountryCode, GOOGLE_ADS_ACCOUNTS } from "@/lib/store"
+import { useAppStore, COUNTRY_OPTIONS, DATA_SOURCE_OPTIONS, DataSourceType, CountryCode, GOOGLE_ADS_ACCOUNTS, THEME_OPTIONS, ThemeType } from "@/lib/store"
 import { DEFAULT_SEED_PROMPT, DEFAULT_ANALYSIS_PROMPT } from "@/lib/prompts"
 import {
   CourseInput,
@@ -70,7 +70,9 @@ export default function Home() {
     setSelectedGoogleAdsAccountId,
     savedBatchItems,
     setSavedBatchItems,
-    clearSavedBatchItems
+    clearSavedBatchItems,
+    theme,
+    setTheme
   } = useAppStore()
 
   // Batch processing state
@@ -91,6 +93,9 @@ export default function Home() {
 
   // Detail view state
   const [detailViewMode, setDetailViewMode] = useState<DetailViewMode>('analyzed')
+
+  // Raw keywords modal state (for viewing during processing)
+  const [showRawKeywordsModal, setShowRawKeywordsModal] = useState(false)
 
   // Filter state
   const [filters, setFilters] = useState<KeywordFilters>({
@@ -128,6 +133,11 @@ export default function Home() {
       if (timerRef.current) clearInterval(timerRef.current)
     }
   }, [])
+
+  // Apply theme to document
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+  }, [theme])
 
   // Load saved batch items on mount (session recovery)
   useEffect(() => {
@@ -317,6 +327,7 @@ export default function Home() {
         body: JSON.stringify({
           seedKeywords: seedResult.data.map((s: SeedKeyword) => s.keyword),
           pageUrl: item.courseInput.courseUrl,
+          courseName: item.courseInput.courseName,  // For URL-based cache lookup
           geoTarget: targetCountry,
           source: dataSource,
           accountId: selectedGoogleAdsAccountId
@@ -432,7 +443,53 @@ export default function Home() {
     return updatedItem
   }
 
-  // Start batch processing
+  // Rate limiting delay for Google Ads API (5 seconds between requests)
+  const GOOGLE_API_DELAY_MS = 5000
+
+  // Helper to delay execution
+  const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+  // Save completed item to databases
+  const saveCompletedItem = async (processedItem: BatchCourseItem) => {
+    addToHistory({
+      id: processedItem.id,
+      createdAt: new Date().toISOString(),
+      courseInput: processedItem.courseInput,
+      seedKeywords: processedItem.seedKeywords,
+      keywordIdeas: processedItem.keywordIdeas,
+      analyzedKeywords: processedItem.analyzedKeywords,
+      status: 'completed'
+    })
+
+    // Save to MongoDB and Supabase
+    try {
+      const saveResponse = await fetch('/api/research/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          courseId: processedItem.id,
+          courseName: processedItem.courseInput.courseName,
+          courseUrl: processedItem.courseInput.courseUrl,
+          vendor: processedItem.courseInput.primaryVendor,
+          certificationCode: processedItem.courseInput.certificationCode,
+          seedKeywords: processedItem.seedKeywords,
+          rawKeywords: processedItem.keywordIdeas,
+          analyzedKeywords: processedItem.analyzedKeywords,
+          dataSource: processedItem.dataSource || dataSource,
+          geoTarget: targetCountry,
+          processingTimeMs: processedItem.processingTimeMs || 0
+        })
+      })
+      const saveResult = await saveResponse.json()
+      if (saveResult.success) {
+        console.log('[SAVE] Research saved to databases:', saveResult.data)
+      }
+    } catch (err) {
+      console.log('[SAVE] Failed to save to databases:', err)
+    }
+  }
+
+  // Start batch processing with concurrent execution
   const startProcessing = async () => {
     setIsProcessing(true)
     abortRef.current = false
@@ -440,61 +497,241 @@ export default function Home() {
     abortControllerRef.current = controller
     startTimer()
 
-    console.log('[BATCH] Starting batch processing...')
+    const pendingItems = batchItems.filter(item => item.status === 'pending')
+    console.log(`[BATCH] Starting CONCURRENT batch processing for ${pendingItems.length} courses...`)
+    console.log(`[BATCH] Rate limit: ${GOOGLE_API_DELAY_MS}ms between Google API calls`)
 
-    for (let i = 0; i < batchItems.length; i++) {
+    // Process each item with staggered Google API calls
+    // All other operations (seeds, cache check, analysis) run as fast as possible
+    const processPromises = pendingItems.map(async (item, index) => {
       if (abortRef.current || controller.signal.aborted) {
-        console.log('[BATCH] Processing stopped by user')
-        break
+        console.log(`[BATCH] Skipping ${item.courseInput.courseName} - processing stopped`)
+        return null
       }
 
-      const item = batchItems[i]
-      if (item.status !== 'pending') continue
+      // Add delay for Google API rate limiting (stagger by index)
+      // Items 0, 1, 2... will have delays 0s, 5s, 10s... for their API calls
+      const apiDelay = index * GOOGLE_API_DELAY_MS
+      console.log(`[BATCH] Course ${index + 1}/${pendingItems.length}: ${item.courseInput.courseName} (API delay: ${apiDelay}ms)`)
 
-      const processedItem = await processItem(item, controller.signal)
-      setBatchItems(prev => prev.map(it => it.id === item.id ? processedItem : it))
+      try {
+        const processedItem = await processItemWithDelay(item, controller.signal, apiDelay)
+        setBatchItems(prev => prev.map(it => it.id === item.id ? processedItem : it))
 
-      // Save to history if completed
-      if (processedItem.status === 'completed') {
-        addToHistory({
-          id: processedItem.id,
-          createdAt: new Date().toISOString(),
-          courseInput: processedItem.courseInput,
-          seedKeywords: processedItem.seedKeywords,
-          keywordIdeas: processedItem.keywordIdeas,
-          analyzedKeywords: processedItem.analyzedKeywords,
-          status: 'completed'
-        })
-
-        // Try to save to MongoDB (if available)
-        try {
-          await fetch('/api/history', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              courseId: processedItem.id,
-              courseName: processedItem.courseInput.courseName,
-              courseUrl: processedItem.courseInput.courseUrl,
-              vendor: processedItem.courseInput.primaryVendor,
-              seedKeywords: processedItem.seedKeywords,
-              rawKeywords: processedItem.keywordIdeas,
-              analyzedKeywords: processedItem.analyzedKeywords,
-              dataSource: processedItem.dataSource || dataSource,
-              geoTarget: targetCountry,
-              processingTimeMs: processedItem.processingTimeMs || 0
-            })
-          })
-        } catch (err) {
-          console.log('[HISTORY] Failed to save to MongoDB (may not be running)')
+        if (processedItem.status === 'completed') {
+          // Save in background - don't wait for it
+          saveCompletedItem(processedItem)
         }
+        return processedItem
+      } catch (err) {
+        console.error(`[BATCH] Error processing ${item.courseInput.courseName}:`, err)
+        return null
       }
-    }
+    })
+
+    // Wait for all courses to complete (they run concurrently with staggered API calls)
+    await Promise.all(processPromises)
 
     console.log('[BATCH] Batch processing finished')
     stopTimer()
     abortControllerRef.current = null
     setIsProcessing(false)
     setActiveView('results')
+  }
+
+  // Process item with delay before API call (for rate limiting)
+  const processItemWithDelay = async (
+    item: BatchCourseItem,
+    signal: AbortSignal,
+    apiDelayMs: number
+  ): Promise<BatchCourseItem> => {
+    const startTime = Date.now()
+
+    // Initialize progress tracking
+    let progress: ProcessingProgress = {
+      currentStep: 0,
+      totalSteps: 6,
+      steps: createProcessingSteps()
+    }
+
+    let updatedItem: BatchCourseItem = {
+      ...item,
+      status: 'generating_seeds' as BatchItemStatus,
+      startTime,
+      progress
+    }
+
+    // Helper to update item with new progress
+    const updateProgress = (stepId: string, stepStatus: 'in_progress' | 'completed' | 'error', details?: string, currentStep?: number) => {
+      progress = updateStep(progress, stepId, {
+        status: stepStatus,
+        details,
+        ...(stepStatus === 'in_progress' ? { startTime: Date.now() } : {}),
+        ...(stepStatus === 'completed' || stepStatus === 'error' ? { endTime: Date.now() } : {})
+      })
+      if (currentStep !== undefined) {
+        progress = { ...progress, currentStep }
+      }
+      updatedItem = { ...updatedItem, progress }
+      setBatchItems(prev => prev.map(i => i.id === item.id ? updatedItem : i))
+    }
+
+    console.log(`[PROCESS] Starting item: ${item.courseInput.courseName}`)
+
+    try {
+      if (signal.aborted) throw new Error('Processing stopped by user')
+
+      // ========== STEP 1: Generate Seeds (runs immediately) ==========
+      updateProgress('generate_seeds', 'in_progress', 'Calling AI for seeds...', 1)
+      console.log(`[STEP 1] Generating seeds for: ${item.courseInput.courseName}`)
+
+      const seedResponse = await fetch('/api/keywords/generate-seeds', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: seedPrompt.prompt,
+          courseName: item.courseInput.courseName,
+          courseUrl: item.courseInput.courseUrl,
+          vendor: item.courseInput.primaryVendor
+        }),
+        signal
+      })
+      const seedResult = await seedResponse.json()
+
+      if (!seedResult.success) {
+        updateProgress('generate_seeds', 'error', seedResult.error)
+        throw new Error(seedResult.error)
+      }
+
+      updateProgress('generate_seeds', 'completed', `Generated ${seedResult.data?.length || 0} seed keywords`)
+      updatedItem = { ...updatedItem, seedKeywords: seedResult.data, status: 'fetching_keywords' }
+      setBatchItems(prev => prev.map(i => i.id === item.id ? updatedItem : i))
+
+      if (signal.aborted) throw new Error('Processing stopped by user')
+
+      // ========== STEP 2: Check Cache ==========
+      updateProgress('check_cache', 'in_progress', 'Looking for cached data...', 2)
+
+      // ========== STEP 3: Fetch Keywords (with rate limiting delay) ==========
+      // Wait for the staggered delay before making Google API call
+      if (apiDelayMs > 0) {
+        updateProgress('fetch_keywords', 'in_progress', `Waiting ${apiDelayMs / 1000}s for rate limit...`, 3)
+        await delay(apiDelayMs)
+      }
+
+      updateProgress('fetch_keywords', 'in_progress', `Fetching from ${dataSource === 'auto' ? 'Google Ads API' : dataSource}...`, 3)
+      console.log(`[STEP 2] Fetching keywords for: ${item.courseInput.courseName}`)
+
+      const keywordsResponse = await fetch('/api/keywords/fetch-ideas', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          seedKeywords: seedResult.data.map((s: SeedKeyword) => s.keyword),
+          pageUrl: item.courseInput.courseUrl,
+          courseName: item.courseInput.courseName,
+          geoTarget: targetCountry,
+          source: dataSource,
+          accountId: selectedGoogleAdsAccountId
+        }),
+        signal
+      })
+      const keywordsResult = await keywordsResponse.json()
+
+      if (!keywordsResult.success) {
+        updateProgress('fetch_keywords', 'error', keywordsResult.error)
+        throw new Error(keywordsResult.error)
+      }
+
+      const dataSourceUsed = keywordsResult.meta?.source || 'unknown'
+      const cacheHit = keywordsResult.meta?.cached || false
+
+      if (cacheHit) {
+        updateProgress('check_cache', 'completed', 'Cache hit! Using cached data (7-day cache)')
+        updateProgress('fetch_keywords', 'completed', `Retrieved ${keywordsResult.data?.length || 0} keywords from cache`)
+        updateProgress('save_cache', 'completed', 'Skipped (using cached data)')
+      } else {
+        updateProgress('check_cache', 'completed', 'No cache found, fetched fresh data')
+        updateProgress('fetch_keywords', 'completed', `Fetched ${keywordsResult.data?.length || 0} keywords from ${dataSourceUsed}`)
+        updateProgress('save_cache', 'in_progress', 'Saving to MongoDB & Supabase...', 4)
+        await delay(100)
+        updateProgress('save_cache', 'completed', 'Cached for 7 days')
+      }
+
+      updatedItem = {
+        ...updatedItem,
+        keywordIdeas: keywordsResult.data,
+        status: 'analyzing',
+        dataSource: dataSourceUsed as 'google_ads' | 'keywords_everywhere' | 'cache',
+        cacheHit
+      }
+      setBatchItems(prev => prev.map(i => i.id === item.id ? updatedItem : i))
+
+      if (signal.aborted) throw new Error('Processing stopped by user')
+
+      // ========== STEP 5: Analyze Keywords (Gemini 3 Flash - fast) ==========
+      const totalKeywords = keywordsResult.data.length
+      updateProgress('analyze', 'in_progress', `Analyzing ${totalKeywords} keywords with Gemini 3 Flash...`, 5)
+
+      console.log(`[STEP 3] Analyzing ${totalKeywords} keywords with Gemini 3 Flash`)
+
+      const analyzeResponse = await fetch('/api/keywords/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: analysisPrompt.prompt,
+          courseName: item.courseInput.courseName,
+          certificationCode: item.courseInput.certificationCode,
+          vendor: item.courseInput.primaryVendor,
+          relatedTerms: item.courseInput.relatedTerms?.join(', '),
+          keywords: keywordsResult.data
+        }),
+        signal
+      })
+      const analyzeResult = await analyzeResponse.json()
+
+      if (!analyzeResult.success) {
+        updateProgress('analyze', 'error', analyzeResult.error)
+        throw new Error(analyzeResult.error)
+      }
+
+      const analyzedCount = analyzeResult.data?.analyzedKeywords?.length || 0
+      updateProgress('analyze', 'completed', `Analyzed ${analyzedCount} keywords`)
+
+      // ========== STEP 6: Complete ==========
+      const endTime = Date.now()
+      const processingTime = endTime - startTime
+
+      updateProgress('complete', 'completed', `Total time: ${formatTime(processingTime)}`, 6)
+
+      updatedItem = {
+        ...updatedItem,
+        analyzedKeywords: analyzeResult.data.analyzedKeywords,
+        status: 'completed',
+        endTime,
+        processingTimeMs: processingTime
+      }
+      console.log(`[COMPLETE] Finished: ${item.courseInput.courseName} - ${analyzedCount} keywords in ${formatTime(processingTime)}`)
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      console.error(`[ERROR] ${item.courseInput.courseName}: ${errorMessage}`)
+
+      const currentStepIndex = progress.currentStep - 1
+      if (currentStepIndex >= 0 && currentStepIndex < progress.steps.length) {
+        const currentStepId = progress.steps[currentStepIndex].id
+        updateProgress(currentStepId, 'error', errorMessage)
+      }
+
+      updatedItem = {
+        ...updatedItem,
+        status: 'error',
+        error: errorMessage,
+        endTime: Date.now(),
+        processingTimeMs: Date.now() - startTime
+      }
+    }
+
+    return updatedItem
   }
 
   // Stop processing
@@ -702,6 +939,31 @@ export default function Home() {
           )}
 
           <div className="flex items-center gap-3">
+            {/* Theme Switcher */}
+            <div className="relative group">
+              <button
+                className="px-3 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors flex items-center gap-2 rounded-lg hover:bg-[var(--bg-hover)]"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" />
+                </svg>
+                <span className="hidden sm:inline">{THEME_OPTIONS.find(t => t.value === theme)?.label || 'Theme'}</span>
+              </button>
+              <div className="absolute right-0 top-full mt-1 w-40 bg-[var(--bg-elevated)] border border-[var(--border-default)] rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                {THEME_OPTIONS.map((t) => (
+                  <button
+                    key={t.value}
+                    onClick={() => setTheme(t.value)}
+                    className={`w-full px-4 py-2 text-left text-sm hover:bg-[var(--bg-hover)] first:rounded-t-lg last:rounded-b-lg transition-colors ${
+                      theme === t.value ? 'text-[var(--accent-electric)] font-medium' : 'text-[var(--text-secondary)]'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <button
               onClick={() => setShowPromptEditor(!showPromptEditor)}
               className="px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors flex items-center gap-2"
@@ -795,6 +1057,167 @@ export default function Home() {
                 className="w-full py-2 text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
               >
                 Reset to Defaults
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Raw Keywords Modal - Google Ads Format */}
+      {showRawKeywordsModal && selectedItem && selectedItem.keywordIdeas.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setShowRawKeywordsModal(false)} />
+          <div className="relative w-full max-w-6xl max-h-[90vh] bg-[var(--bg-secondary)] border border-[var(--border-default)] rounded-2xl overflow-hidden flex flex-col">
+            {/* Modal Header */}
+            <div className="p-6 border-b border-[var(--border-subtle)] flex items-center justify-between">
+              <div>
+                <h2 className="font-display font-bold text-xl">Raw Keywords from {selectedItem.cacheHit ? 'Cache' : 'Google Ads API'}</h2>
+                <p className="text-sm text-[var(--text-muted)] mt-1">
+                  {selectedItem.keywordIdeas.length} keywords fetched for "{selectedItem.courseInput.courseName}"
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                {/* Account Name Badge */}
+                {GOOGLE_ADS_ACCOUNTS.find(a => a.id === selectedGoogleAdsAccountId)?.name && (
+                  <span className="px-3 py-1 rounded-lg bg-[var(--accent-violet)]/20 text-[var(--accent-violet)] text-xs font-medium">
+                    {GOOGLE_ADS_ACCOUNTS.find(a => a.id === selectedGoogleAdsAccountId)?.name}
+                  </span>
+                )}
+                {/* Source Badge */}
+                <span className={`px-3 py-1 rounded-lg text-xs font-medium ${
+                  selectedItem.cacheHit
+                    ? 'bg-[var(--accent-amber)]/20 text-[var(--accent-amber)]'
+                    : 'bg-[var(--accent-electric)]/20 text-[var(--accent-electric)]'
+                }`}>
+                  {selectedItem.cacheHit ? '📦 Cached Data' : `🔗 ${selectedItem.dataSource || 'google_ads'}`}
+                </span>
+                <button
+                  onClick={() => setShowRawKeywordsModal(false)}
+                  className="p-2 hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body - Keywords Table */}
+            <div className="flex-1 overflow-auto p-4">
+              <table className="w-full data-table">
+                <thead className="sticky top-0 bg-[var(--bg-secondary)]">
+                  <tr className="border-b border-[var(--border-subtle)]">
+                    <th className="text-left py-3 px-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">#</th>
+                    <th className="text-left py-3 px-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Keyword</th>
+                    <th className="text-right py-3 px-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Avg. Monthly Searches</th>
+                    <th className="text-center py-3 px-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Competition</th>
+                    <th className="text-right py-3 px-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Competition Index</th>
+                    <th className="text-right py-3 px-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Low Top of Page Bid</th>
+                    <th className="text-right py-3 px-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">High Top of Page Bid</th>
+                    <th className="text-center py-3 px-4 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">In Account</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedItem.keywordIdeas
+                    .sort((a, b) => b.avgMonthlySearches - a.avgMonthlySearches)
+                    .map((kw, index) => (
+                    <tr key={index} className="border-b border-[var(--border-subtle)] hover:bg-[var(--bg-hover)]">
+                      <td className="py-3 px-4 text-sm text-[var(--text-muted)] font-mono">{index + 1}</td>
+                      <td className="py-3 px-4 text-sm text-[var(--text-primary)] font-medium">{kw.keyword}</td>
+                      <td className="py-3 px-4 text-right">
+                        <span className="font-mono text-sm text-[var(--accent-lime)]">
+                          {formatNumber(kw.avgMonthlySearches)}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          kw.competition === 'LOW' ? 'bg-green-500/20 text-green-400' :
+                          kw.competition === 'MEDIUM' ? 'bg-yellow-500/20 text-yellow-400' :
+                          kw.competition === 'HIGH' ? 'bg-red-500/20 text-red-400' :
+                          'bg-gray-500/20 text-gray-400'
+                        }`}>
+                          {kw.competition}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className="font-mono text-sm text-[var(--text-secondary)]">
+                          {kw.competitionIndex}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className="font-mono text-sm text-[var(--text-secondary)]">
+                          {kw.lowTopOfPageBidMicros
+                            ? `${kw.bidCurrency === 'INR' ? '₹' : '$'}${(kw.lowTopOfPageBidMicros / 1000000).toFixed(2)}`
+                            : '-'}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className="font-mono text-sm text-[var(--text-secondary)]">
+                          {kw.highTopOfPageBidMicros
+                            ? `${kw.bidCurrency === 'INR' ? '₹' : '$'}${(kw.highTopOfPageBidMicros / 1000000).toFixed(2)}`
+                            : '-'}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        {kw.inAccount ? (
+                          <span
+                            className="inline-flex items-center justify-center min-w-[24px] px-2 py-1 rounded-full bg-[var(--accent-lime)]/20 text-[var(--accent-lime)] text-xs font-bold cursor-help"
+                            title={kw.inAccountNames?.join(', ') || 'In account'}
+                          >
+                            {kw.inAccountNames && kw.inAccountNames.length > 1
+                              ? `${kw.inAccountNames.length}`
+                              : kw.inAccountNames?.[0]?.split(' ')[0] || 'Y'}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[var(--bg-tertiary)] text-[var(--text-muted)] text-xs">
+                            -
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-[var(--border-subtle)] bg-[var(--bg-tertiary)] flex items-center justify-between">
+              <div className="flex items-center gap-4 text-xs text-[var(--text-muted)]">
+                <span>Total: <strong className="text-[var(--text-primary)]">{selectedItem.keywordIdeas.length}</strong> keywords</span>
+                <span>Low Competition: <strong className="text-green-400">{selectedItem.keywordIdeas.filter(k => k.competition === 'LOW').length}</strong></span>
+                <span>Medium: <strong className="text-yellow-400">{selectedItem.keywordIdeas.filter(k => k.competition === 'MEDIUM').length}</strong></span>
+                <span>High: <strong className="text-red-400">{selectedItem.keywordIdeas.filter(k => k.competition === 'HIGH').length}</strong></span>
+              </div>
+              <button
+                onClick={() => {
+                  // Export raw keywords as CSV - detect currency from first keyword
+                  const currency = selectedItem.keywordIdeas[0]?.bidCurrency || 'INR'
+                  const currencySymbol = currency === 'INR' ? '₹' : '$'
+                  const headers = ['Keyword', 'Avg Monthly Searches', 'Competition', 'Competition Index', `Low Top of Page Bid (${currencySymbol})`, `High Top of Page Bid (${currencySymbol})`, 'In Account', 'Account Names']
+                  const rows = selectedItem.keywordIdeas.map(kw => [
+                    kw.keyword,
+                    kw.avgMonthlySearches,
+                    kw.competition,
+                    kw.competitionIndex,
+                    kw.lowTopOfPageBidMicros ? (kw.lowTopOfPageBidMicros / 1000000).toFixed(2) : '',
+                    kw.highTopOfPageBidMicros ? (kw.highTopOfPageBidMicros / 1000000).toFixed(2) : '',
+                    kw.inAccount ? 'Yes' : 'No',
+                    kw.inAccountNames?.join('; ') || ''
+                  ])
+                  const csvContent = [
+                    headers.join(','),
+                    ...rows.map(row => row.map(cell =>
+                      typeof cell === 'string' && cell.includes(',') ? `"${cell}"` : cell
+                    ).join(','))
+                  ].join('\n')
+                  downloadCSV(csvContent, `raw-keywords-${selectedItem.courseInput.courseName.replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.csv`)
+                }}
+                className="px-4 py-2 rounded-lg bg-[var(--accent-electric)] text-white text-sm font-medium hover:bg-[var(--accent-electric)]/80 transition-colors flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                Export Raw CSV
               </button>
             </div>
           </div>
@@ -1559,10 +1982,23 @@ export default function Home() {
 
                       {/* Step Progress List */}
                       <div className="space-y-3">
-                        {selectedItem.progress?.steps.map((step, index) => (
+                        {selectedItem.progress?.steps.map((step, index) => {
+                          // Check if this step has viewable data (fetch_keywords step with results)
+                          const isKeywordsFetchStep = step.id === 'fetch_keywords'
+                          const hasKeywordsData = selectedItem.keywordIdeas && selectedItem.keywordIdeas.length > 0
+                          const isClickable = isKeywordsFetchStep && hasKeywordsData && step.status === 'completed'
+
+                          return (
                           <div
                             key={step.id}
+                            onClick={() => {
+                              if (isClickable) {
+                                setShowRawKeywordsModal(true)
+                              }
+                            }}
                             className={`p-4 rounded-xl border transition-all ${
+                              isClickable ? 'cursor-pointer hover:ring-2 hover:ring-[var(--accent-electric)]/50' : ''
+                            } ${
                               step.status === 'in_progress'
                                 ? 'bg-[var(--accent-electric)]/10 border-[var(--accent-electric)]'
                                 : step.status === 'completed'
@@ -1624,6 +2060,19 @@ export default function Home() {
                                   {formatTime(step.endTime - step.startTime)}
                                 </span>
                               )}
+
+                              {/* View Keywords Button for fetch_keywords step */}
+                              {isClickable && (
+                                <button
+                                  className="ml-2 px-3 py-1 text-xs bg-[var(--accent-electric)]/20 text-[var(--accent-electric)] rounded-lg hover:bg-[var(--accent-electric)]/30 transition-colors flex items-center gap-1"
+                                >
+                                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                  </svg>
+                                  View
+                                </button>
+                              )}
                             </div>
 
                             {/* Analysis Progress Indicator (for analyze step) */}
@@ -1635,7 +2084,7 @@ export default function Home() {
                               </div>
                             )}
                           </div>
-                        ))}
+                        )})}
                       </div>
                     </div>
                   )}

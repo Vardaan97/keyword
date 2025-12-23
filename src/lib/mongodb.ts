@@ -23,22 +23,25 @@ export function isMongoConfigured(): boolean {
   return !!MONGODB_URI
 }
 
+// Detect if using mongodb+srv:// (Atlas) vs mongodb://
+const isAtlasConnection = MONGODB_URI.startsWith('mongodb+srv://')
+
 // MongoDB connection options optimized for serverless (Vercel)
+// Note: For mongodb+srv:// (Atlas), TLS is handled automatically by the driver
 const mongoOptions = {
-  // TLS/SSL configuration - required for MongoDB Atlas
-  tls: true,
-  tlsAllowInvalidCertificates: false,
   // Connection pool settings for serverless
   maxPoolSize: 10,
   minPoolSize: 0,
   maxIdleTimeMS: 10000,
   // Timeout settings
-  serverSelectionTimeoutMS: 10000,
-  connectTimeoutMS: 10000,
-  socketTimeoutMS: 45000,
+  serverSelectionTimeoutMS: 15000,
+  connectTimeoutMS: 15000,
+  socketTimeoutMS: 60000,
   // Retry settings
   retryWrites: true,
   retryReads: true,
+  // Only add explicit TLS for non-Atlas connections
+  ...(isAtlasConnection ? {} : { tls: true }),
 }
 
 // Initialize MongoDB client with connection caching for serverless

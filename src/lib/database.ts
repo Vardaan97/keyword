@@ -118,7 +118,7 @@ export async function setCachedKeywords(
   geoTarget: string,
   source: string,
   keywords: UnifiedKeywordData[],
-  ttlHours = 48
+  ttlHours = 168  // 7 days (168 hours) - Google recommends 30 days, 7 is good balance
 ): Promise<void> {
   const cacheKey = `${seedKeywords.sort().join(',')}_${geoTarget}_${source}`
   const results: string[] = []

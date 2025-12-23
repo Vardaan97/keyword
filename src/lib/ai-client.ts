@@ -22,6 +22,7 @@ export interface ChatCompletionOptions {
   temperature?: number
   maxTokens?: number
   jsonMode?: boolean
+  model?: string  // Override the default model for this request
 }
 
 export interface ChatCompletionResult {
@@ -31,24 +32,31 @@ export interface ChatCompletionResult {
   model: string
 }
 
-// OpenRouter models - latest models with large context windows (Dec 2025)
+// OpenRouter models - verified working models (Dec 2025)
 const OPENROUTER_MODELS = {
-  // Default: GPT-5 Mini - 400K context, 128K output, fast and cheap
-  default: 'openai/gpt-5-mini',
+  // Default: GPT-4o Mini - fast, cheap, reliable
+  default: 'openai/gpt-4o-mini',
   // OpenAI models (best for JSON output)
-  gpt5_mini: 'openai/gpt-5-mini', // 400K context, 128K output, $0.25/M in, $2/M out - BEST VALUE
-  o4_mini: 'openai/o4-mini', // 200K context, reasoning model
   gpt4o: 'openai/gpt-4o', // 128K context
-  gpt4o_mini: 'openai/gpt-4o-mini', // 128K context
-  // Gemini models
-  gemini_3_flash: 'google/gemini-3-flash-preview', // 1M context, 16K output
-  gemini_25_flash: 'google/gemini-2.5-flash', // 1M context
-  gemini_pro: 'google/gemini-2.5-pro', // 1M context, 65K output
+  gpt4o_mini: 'openai/gpt-4o-mini', // 128K context, cost-effective
+  // Gemini models - FASTEST options with huge context (Dec 2025)
+  gemini_3_flash: 'google/gemini-3-flash-preview', // NEW: Fastest, 1M context, outperforms 2.5 Pro
+  gemini_25_flash: 'google/gemini-2.5-flash', // Fast, 1M context, advanced reasoning
+  gemini_25_flash_lite: 'google/gemini-2.5-flash-lite', // Ultra-low latency, cheapest
+  gemini_flash: 'google/gemini-2.0-flash-001', // Legacy, still fast
+  gemini_pro: 'google/gemini-pro-1.5', // 2M context
   // Claude models
-  claude_sonnet: 'anthropic/claude-sonnet-4', // 1M context, 64K output
-  claude_haiku: 'anthropic/claude-3-haiku',
+  claude_sonnet: 'anthropic/claude-3.5-sonnet', // 200K context
+  claude_haiku: 'anthropic/claude-3-haiku', // Fast, cheap, 200K context
   // Auto router - let OpenRouter pick the best model
   auto: 'openrouter/auto',
+} as const
+
+// Fast models for analysis (ordered by speed) - Dec 2025 update
+// Using Gemini 3 Flash Preview - 3x faster than 2.5 Pro, near Pro-level reasoning
+export const FAST_ANALYSIS_MODELS = {
+  openrouter: 'google/gemini-3-flash-preview',  // 1M context, fastest, best quality
+  openai: 'gpt-4o-mini',  // Fallback for OpenAI direct
 } as const
 
 // OpenAI direct models
@@ -61,7 +69,7 @@ const OPENAI_MODELS = {
 // Default model selection based on provider
 const DEFAULT_MODELS: Record<AIProvider, string> = {
   openai: OPENAI_MODELS.default, // gpt-4o-mini
-  openrouter: OPENROUTER_MODELS.default, // gpt-5-mini (400K context, 128K output, fast)
+  openrouter: OPENROUTER_MODELS.default, // gpt-4o-mini via OpenRouter
 }
 
 class AIClient {
@@ -150,7 +158,8 @@ class AIClient {
     config?: AIClientConfig
   ): Promise<ChatCompletionResult> {
     const provider = config?.provider || this.defaultProvider
-    const model = config?.model || DEFAULT_MODELS[provider]
+    // Allow model override from options (for fast analysis) or config
+    const model = options.model || config?.model || DEFAULT_MODELS[provider]
     const client = this.getClient(provider)
 
     console.log(`[AI-CLIENT] Using ${provider} with model: ${model}`)
@@ -215,8 +224,22 @@ class AIClient {
     options: ChatCompletionOptions,
     config?: AIClientConfig
   ): Promise<ChatCompletionResult> {
-    const primaryProvider = config?.provider || this.defaultProvider
+    const requestedProvider = config?.provider || this.defaultProvider
     const providers = this.getAvailableProviders()
+
+    // If no providers available, throw helpful error
+    if (providers.length === 0) {
+      throw new Error('No AI providers configured. Please set OPENROUTER_API_KEY or OPENAI_API_KEY in your environment.')
+    }
+
+    // If requested provider isn't available, use what's available
+    const primaryProvider = providers.includes(requestedProvider)
+      ? requestedProvider
+      : providers[0]
+
+    if (primaryProvider !== requestedProvider) {
+      console.log(`[AI-CLIENT] Requested ${requestedProvider} not available, using ${primaryProvider}`)
+    }
 
     // Try primary provider first
     try {

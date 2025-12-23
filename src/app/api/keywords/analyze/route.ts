@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { aiClient, AIProvider } from '@/lib/ai-client'
+import { aiClient, AIProvider, FAST_ANALYSIS_MODELS } from '@/lib/ai-client'
 import { fillPromptVariables } from '@/lib/prompts'
 import { KeywordIdea, AnalyzedKeyword, ApiResponse } from '@/types'
 
@@ -184,6 +184,13 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         console.log(`[ANALYZE] ${batchLabel} Sending ${batchKeywords.length} keywords to AI...`, retryCount > 0 ? `[Retry ${retryCount}]` : '')
 
         try {
+          // Use fast model for analysis - Gemini Flash is 10x faster than GPT-4o-mini
+          // with 1M context window (can handle 1000+ keywords in single batch)
+          const preferredProvider: AIProvider = aiProvider || 'openrouter'
+          const fastModel = FAST_ANALYSIS_MODELS[preferredProvider] || FAST_ANALYSIS_MODELS.openrouter
+
+          console.log(`[ANALYZE] ${batchLabel} Using fast model: ${fastModel}`)
+
           const result = await aiClient.chatCompletionWithFallback(
             {
               messages: [
@@ -202,10 +209,11 @@ CRITICAL OUTPUT REQUIREMENTS:
                 }
               ],
               temperature: 0.3,
-              maxTokens: 32000, // GPT-5 Mini supports up to 128K output tokens
-              jsonMode: true
+              maxTokens: 65000, // Gemini Flash supports up to 65K output tokens
+              jsonMode: true,
+              model: fastModel  // Use the fast model explicitly
             },
-            { provider: aiProvider }
+            { provider: preferredProvider }
           )
 
           const responseText = result.content

@@ -19,6 +19,16 @@ import { GOOGLE_ADS_ACCOUNTS, GoogleAdsAccount } from './google-ads'
 export type DataSourceType = 'auto' | 'google' | 'keywords_everywhere'
 export type CountryCode = 'india' | 'usa' | 'uk' | 'uae' | 'singapore' | 'australia' | 'canada' | 'germany' | 'malaysia' | 'saudi' | 'global'
 
+// Theme types
+export type ThemeType = 'dark' | 'light' | 'koenig' | 'blue'
+
+export const THEME_OPTIONS: { value: ThemeType; label: string; description: string }[] = [
+  { value: 'dark', label: 'Dark', description: 'Default dark theme' },
+  { value: 'light', label: 'Light', description: 'Clean light theme' },
+  { value: 'koenig', label: 'Koenig', description: 'Koenig Solutions brand colors' },
+  { value: 'blue', label: 'Blue', description: 'Professional blue theme' }
+]
+
 // Re-export Google Ads accounts for easy access
 export { GOOGLE_ADS_ACCOUNTS }
 export type { GoogleAdsAccount }
@@ -45,8 +55,8 @@ export const DATA_SOURCE_OPTIONS: { value: DataSourceType; label: string; descri
 
 // AI Provider options
 export const AI_PROVIDER_OPTIONS: { value: AIProvider; label: string; description: string; model: string }[] = [
-  { value: 'openrouter', label: 'OpenRouter', description: 'Gemini 2.0 Flash - Fast & cost-effective', model: 'google/gemini-2.0-flash-001' },
-  { value: 'openai', label: 'OpenAI', description: 'GPT-4o - High quality', model: 'gpt-4o' }
+  { value: 'openrouter', label: 'OpenRouter', description: 'GPT-4o Mini via OpenRouter - Cost-effective', model: 'openai/gpt-4o-mini' },
+  { value: 'openai', label: 'OpenAI Direct', description: 'GPT-4o Mini - Fast & reliable', model: 'gpt-4o-mini' }
 ]
 
 interface AppState {
@@ -71,6 +81,10 @@ interface AppState {
   // AI Provider Settings
   aiProvider: AIProvider
   setAiProvider: (provider: AIProvider) => void
+
+  // Theme Settings
+  theme: ThemeType
+  setTheme: (theme: ThemeType) => void
 
   // Current Session
   currentSession: ResearchSession | null
@@ -126,8 +140,8 @@ export const useAppStore = create<AppState>()(
       setDataSource: (source) => set({ dataSource: source }),
       setTargetCountry: (country) => set({ targetCountry: country }),
 
-      // Google Ads Account Selection (default to first account)
-      selectedGoogleAdsAccountId: GOOGLE_ADS_ACCOUNTS[0]?.id || 'koenig-main',
+      // Google Ads Account Selection (default to Bouquet INR - has most keywords)
+      selectedGoogleAdsAccountId: 'bouquet-inr',
       setSelectedGoogleAdsAccountId: (accountId) => set({ selectedGoogleAdsAccountId: accountId }),
       getSelectedGoogleAdsAccount: () => {
         const accountId = get().selectedGoogleAdsAccountId
@@ -137,6 +151,10 @@ export const useAppStore = create<AppState>()(
       // AI Provider Settings (default to openrouter for cost-effectiveness)
       aiProvider: 'openrouter',
       setAiProvider: (provider) => set({ aiProvider: provider }),
+
+      // Theme Settings (default to dark)
+      theme: 'dark',
+      setTheme: (theme) => set({ theme }),
 
       // Current Session
       currentSession: null,
@@ -258,6 +276,7 @@ export const useAppStore = create<AppState>()(
         targetCountry: state.targetCountry,
         selectedGoogleAdsAccountId: state.selectedGoogleAdsAccountId,
         aiProvider: state.aiProvider,
+        theme: state.theme,
         savedBatchItems: state.savedBatchItems
       })
     }

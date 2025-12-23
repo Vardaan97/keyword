@@ -13,15 +13,18 @@ export interface GoogleAdsAccount {
   id: string
   name: string
   customerId: string
+  currency: 'INR' | 'USD' | string  // Account billing currency
+  priority?: number  // Higher = check first for "in account" (Bouquet has most keywords)
 }
 
 // Available accounts under the MCC (Manager account)
 // These are the sub-accounts accessible via the login customer ID
+// Priority: Higher number = check first (Bouquet INR has most keywords)
 export const GOOGLE_ADS_ACCOUNTS: GoogleAdsAccount[] = [
-  { id: 'all-accounts', name: 'All Accounts', customerId: 'ALL' },  // Special option to check all accounts
-  { id: 'flexi', name: 'Flexi', customerId: '3515012934' },
-  { id: 'bouquet-inr', name: 'Bouquet INR', customerId: '6153038296' },
-  { id: 'bouquet-inr-2', name: 'Bouquet INR - 2', customerId: '6601080005' }
+  { id: 'all-accounts', name: 'All Accounts', customerId: 'ALL', currency: 'INR' },  // Special option to check all accounts
+  { id: 'bouquet-inr', name: 'Bouquet INR', customerId: '6153038296', currency: 'INR', priority: 3 },  // Default - most keywords
+  { id: 'bouquet-inr-2', name: 'Bouquet INR - 2', customerId: '6601080005', currency: 'INR', priority: 2 },
+  { id: 'flexi', name: 'Flexi', customerId: '3515012934', currency: 'INR', priority: 1 }
 ]
 
 // Get all real account IDs (excluding the "ALL" option)
@@ -132,6 +135,9 @@ export function getAccountName(customerId: string): string {
   return account?.name || `Account ${cleanId}`
 }
 
+// Map to track which accounts contain which keywords (keyword -> account names)
+type AccountKeywordsMap = Map<string, Set<string>>
+
 export async function getKeywordIdeas(
   config: GoogleAdsConfig,
   request: KeywordPlannerRequest
@@ -144,25 +150,46 @@ export async function getKeywordIdeas(
 
   // Fetch account keywords - either from single account or all accounts
   let accountKeywords: Set<string>
+  // Map keyword -> list of account names that contain it
+  const keywordToAccounts: AccountKeywordsMap = new Map()
   const accessToken = await getAccessToken(config)
 
+  // Get currency for bid display - default to INR for Indian accounts
+  const currentAccount = GOOGLE_ADS_ACCOUNTS.find(acc => acc.customerId === request.customerId.replace(/-/g, ''))
+  const bidCurrency = currentAccount?.currency || 'INR'
+
   if (request.checkAllAccounts && request.allAccountIds && request.allAccountIds.length > 0) {
-    // Fetch keywords from all accounts in parallel and combine them
+    // Fetch keywords from all accounts in parallel and track which account has each keyword
     console.log(`[GOOGLE-ADS] Fetching keywords from ${request.allAccountIds.length} accounts...`)
-    const allKeywordSets = await Promise.all(
-      request.allAccountIds.map(accId => getAccountKeywords(config, accId))
+    const accountResults = await Promise.all(
+      request.allAccountIds.map(async (accId) => {
+        const keywords = await getAccountKeywords(config, accId)
+        const accountName = getAccountName(accId)
+        return { accId, accountName, keywords }
+      })
     )
-    // Combine all keywords into a single set
+
+    // Combine all keywords and track which accounts have each keyword
     accountKeywords = new Set<string>()
-    for (const kwSet of allKeywordSets) {
-      for (const kw of kwSet) {
+    for (const { accountName, keywords } of accountResults) {
+      for (const kw of keywords) {
         accountKeywords.add(kw)
+        // Track which accounts have this keyword
+        if (!keywordToAccounts.has(kw)) {
+          keywordToAccounts.set(kw, new Set())
+        }
+        keywordToAccounts.get(kw)!.add(accountName)
       }
     }
     console.log('[GOOGLE-ADS] Combined keywords from all accounts:', accountKeywords.size, 'unique keywords')
   } else {
     // Single account mode
     accountKeywords = await getAccountKeywords(config, request.customerId)
+    const accountName = getAccountName(request.customerId)
+    // Track all keywords as belonging to this single account
+    for (const kw of accountKeywords) {
+      keywordToAccounts.set(kw, new Set([accountName]))
+    }
     console.log('[GOOGLE-ADS] Account keywords loaded:', accountKeywords.size, 'keywords')
   }
 
@@ -259,6 +286,9 @@ export async function getKeywordIdeas(
     // Cross-reference against actual keywords fetched from the account
     const keywordText = (result.text as string).toLowerCase()
     const inAccount = accountKeywords.has(keywordText)
+    // Get list of account names that contain this keyword
+    const accountsWithKeyword = keywordToAccounts.get(keywordText)
+    const inAccountNames = accountsWithKeyword ? Array.from(accountsWithKeyword) : []
 
     if (inAccount) inAccountCount++
 
@@ -269,7 +299,9 @@ export async function getKeywordIdeas(
       competitionIndex: Number(metrics.competitionIndex) || 0,
       lowTopOfPageBidMicros: Number(metrics.lowTopOfPageBidMicros) || undefined,
       highTopOfPageBidMicros: Number(metrics.highTopOfPageBidMicros) || undefined,
-      inAccount
+      bidCurrency,  // Include the account's currency for proper display
+      inAccount,
+      inAccountNames  // List of account names containing this keyword
     }
   })
 
