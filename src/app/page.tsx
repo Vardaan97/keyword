@@ -668,11 +668,11 @@ export default function Home() {
 
       if (signal.aborted) throw new Error('Processing stopped by user')
 
-      // ========== STEP 5: Analyze Keywords (Gemini 3 Flash - fast) ==========
+      // ========== STEP 5: Analyze Keywords (Gemini 2.0 Flash - stable & fast) ==========
       const totalKeywords = keywordsResult.data.length
-      updateProgress('analyze', 'in_progress', `Analyzing ${totalKeywords} keywords with Gemini 3 Flash...`, 5)
+      updateProgress('analyze', 'in_progress', `Analyzing ${totalKeywords} keywords with AI...`, 5)
 
-      console.log(`[STEP 3] Analyzing ${totalKeywords} keywords with Gemini 3 Flash`)
+      console.log(`[STEP 3] Analyzing ${totalKeywords} keywords with Gemini 2.0 Flash`)
 
       const analyzeResponse = await fetch('/api/keywords/analyze', {
         method: 'POST',

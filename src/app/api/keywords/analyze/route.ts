@@ -184,12 +184,16 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         console.log(`[ANALYZE] ${batchLabel} Sending ${batchKeywords.length} keywords to AI...`, retryCount > 0 ? `[Retry ${retryCount}]` : '')
 
         try {
-          // Use fast model for analysis - Gemini Flash is 10x faster than GPT-4o-mini
-          // with 1M context window (can handle 1000+ keywords in single batch)
+          // Use fast model for analysis - try Gemini first, fallback to GPT-4o-mini if needed
           const preferredProvider: AIProvider = aiProvider || 'openrouter'
-          const fastModel = FAST_ANALYSIS_MODELS[preferredProvider] || FAST_ANALYSIS_MODELS.openrouter
 
-          console.log(`[ANALYZE] ${batchLabel} Using fast model: ${fastModel}`)
+          // Model selection: Gemini 3 Flash is fastest, but GPT-4o-mini is more reliable for JSON
+          // We try the fast model first, and the route has retry logic that will try alternatives
+          const fastModel = retryCount === 0
+            ? FAST_ANALYSIS_MODELS[preferredProvider] || 'google/gemini-2.0-flash-001'
+            : 'openai/gpt-4o-mini'  // Use more reliable GPT-4o-mini on retry
+
+          console.log(`[ANALYZE] ${batchLabel} Using model: ${fastModel}${retryCount > 0 ? ' (fallback)' : ''}`)
 
           const result = await aiClient.chatCompletionWithFallback(
             {
@@ -199,19 +203,20 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
                   content: `You are a keyword analysis expert. Follow the user's instructions exactly.
 
 CRITICAL OUTPUT REQUIREMENTS:
-1. Return ONLY valid JSON - no markdown, no code blocks, no explanations before or after
-2. Analyze ALL ${batchKeywords.length} keywords provided - do not skip any
-3. Ensure the JSON is complete and properly formatted`
+1. Return ONLY valid JSON - no markdown code blocks, no text before or after the JSON
+2. Start your response directly with { and end with }
+3. Analyze ALL ${batchKeywords.length} keywords provided - do not skip any
+4. Ensure the JSON is complete with proper closing brackets`
                 },
                 {
                   role: 'user',
                   content: filledPrompt
                 }
               ],
-              temperature: 0.3,
-              maxTokens: 65000, // Gemini Flash supports up to 65K output tokens
+              temperature: 0.2,  // Lower temperature for more consistent JSON output
+              maxTokens: 32000,  // Reduced for reliability - still enough for 500+ keywords
               jsonMode: true,
-              model: fastModel  // Use the fast model explicitly
+              model: fastModel
             },
             { provider: preferredProvider }
           )

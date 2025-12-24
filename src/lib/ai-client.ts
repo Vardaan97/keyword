@@ -52,11 +52,18 @@ const OPENROUTER_MODELS = {
   auto: 'openrouter/auto',
 } as const
 
-// Fast models for analysis (ordered by speed) - Dec 2025 update
-// Using Gemini 3 Flash Preview - 3x faster than 2.5 Pro, near Pro-level reasoning
+// Fast models for analysis (ordered by reliability for JSON output)
+// Using Gemini 2.0 Flash - stable, fast, good for structured output
 export const FAST_ANALYSIS_MODELS = {
-  openrouter: 'google/gemini-3-flash-preview',  // 1M context, fastest, best quality
-  openai: 'gpt-4o-mini',  // Fallback for OpenAI direct
+  openrouter: 'google/gemini-2.0-flash-001',  // Stable, fast, 1M context
+  openai: 'gpt-4o-mini',  // Most reliable for JSON, 128K context
+} as const
+
+// Alternative fast models (for manual selection)
+export const ALTERNATIVE_MODELS = {
+  gemini_3_flash: 'google/gemini-3-flash-preview',  // Fastest, but newer/less stable
+  gemini_25_flash: 'google/gemini-2.5-flash',  // Advanced reasoning
+  gpt4o_mini: 'openai/gpt-4o-mini',  // Most reliable JSON
 } as const
 
 // OpenAI direct models
