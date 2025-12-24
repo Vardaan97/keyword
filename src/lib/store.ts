@@ -199,20 +199,32 @@ export const useAppStore = create<AppState>()(
       },
 
       // Session History
+      // NOTE: To avoid localStorage quota errors, we only store session METADATA
+      // Full keyword data should be retrieved from the database if needed
       sessionHistory: [],
 
       addToHistory: (session) => {
         const history = get().sessionHistory
+
+        // Create a lightweight version WITHOUT large keyword arrays
+        // This prevents localStorage quota exceeded errors
+        const lightweightSession: ResearchSession = {
+          ...session,
+          // Keep only a small sample of keywords for preview (max 10)
+          keywordIdeas: session.keywordIdeas.slice(0, 10),
+          analyzedKeywords: session.analyzedKeywords.slice(0, 10),
+        }
+
         // Check if session already exists
         const existingIndex = history.findIndex(s => s.id === session.id)
         if (existingIndex >= 0) {
           // Update existing
           const newHistory = [...history]
-          newHistory[existingIndex] = session
+          newHistory[existingIndex] = lightweightSession
           set({ sessionHistory: newHistory })
         } else {
-          // Add new (max 50 sessions)
-          set({ sessionHistory: [session, ...history].slice(0, 50) })
+          // Add new (max 20 sessions to keep storage small)
+          set({ sessionHistory: [lightweightSession, ...history].slice(0, 20) })
         }
       },
 
@@ -262,8 +274,18 @@ export const useAppStore = create<AppState>()(
       setIsProcessing: (processing) => set({ isProcessing: processing }),
 
       // Batch Items (persisted for session recovery)
+      // NOTE: We only save lightweight metadata to avoid localStorage quota errors
       savedBatchItems: [],
-      setSavedBatchItems: (items) => set({ savedBatchItems: items }),
+      setSavedBatchItems: (items) => {
+        // Create lightweight versions to save storage space
+        const lightweightItems = items.map(item => ({
+          ...item,
+          // Don't persist large keyword arrays - just keep counts
+          keywordIdeas: item.keywordIdeas?.slice(0, 5) || [],
+          analyzedKeywords: item.analyzedKeywords?.slice(0, 5) || [],
+        }))
+        set({ savedBatchItems: lightweightItems.slice(0, 20) }) // Max 20 items
+      },
       clearSavedBatchItems: () => set({ savedBatchItems: [] })
     }),
     {
@@ -277,8 +299,53 @@ export const useAppStore = create<AppState>()(
         selectedGoogleAdsAccountId: state.selectedGoogleAdsAccountId,
         aiProvider: state.aiProvider,
         theme: state.theme,
-        savedBatchItems: state.savedBatchItems
-      })
+        // Don't persist savedBatchItems to localStorage - they're in-memory only
+        // This prevents quota issues when processing large batches
+        // savedBatchItems: state.savedBatchItems  // DISABLED
+      }),
+      // Handle storage errors gracefully (including SSR where localStorage doesn't exist)
+      storage: {
+        getItem: (name) => {
+          if (typeof window === 'undefined') return null
+          try {
+            const str = localStorage.getItem(name)
+            return str ? JSON.parse(str) : null
+          } catch (error) {
+            console.error('[STORE] Failed to read from localStorage:', error)
+            return null
+          }
+        },
+        setItem: (name, value) => {
+          if (typeof window === 'undefined') return
+          try {
+            localStorage.setItem(name, JSON.stringify(value))
+          } catch (error) {
+            console.error('[STORE] Failed to write to localStorage (quota exceeded?):', error)
+            // Try to clear old data and retry
+            try {
+              // Clear session history to make space
+              const current = JSON.parse(localStorage.getItem(name) || '{}')
+              if (current.state) {
+                current.state.sessionHistory = []
+              }
+              localStorage.setItem(name, JSON.stringify(current))
+              console.log('[STORE] Cleared session history to make space')
+            } catch {
+              // Last resort: clear everything
+              localStorage.removeItem(name)
+              console.log('[STORE] Cleared all storage due to quota error')
+            }
+          }
+        },
+        removeItem: (name) => {
+          if (typeof window === 'undefined') return
+          try {
+            localStorage.removeItem(name)
+          } catch (error) {
+            console.error('[STORE] Failed to remove from localStorage:', error)
+          }
+        },
+      }
     }
   )
 )

@@ -205,12 +205,16 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     }
   }
 
+  console.log('[FETCH-IDEAS] ========================================')
   console.log('[FETCH-IDEAS] Request received')
-  console.log('[FETCH-IDEAS] Seeds:', seedKeywords)
+  console.log('[FETCH-IDEAS] Course:', courseName || 'N/A')
+  console.log('[FETCH-IDEAS] Seeds:', seedKeywords.slice(0, 3).join(', '), seedKeywords.length > 3 ? `... (${seedKeywords.length} total)` : '')
   console.log('[FETCH-IDEAS] Geo Target:', geoTarget)
   console.log('[FETCH-IDEAS] Source:', source)
   console.log('[FETCH-IDEAS] Skip Cache:', skipCache)
   console.log('[FETCH-IDEAS] Account:', accountName, checkAllAccounts ? `(checking ${allAccountIds.length} accounts)` : `(${customerId})`)
+  console.log('[FETCH-IDEAS] ========================================')
+  console.log('[FETCH-IDEAS] STEP 1: Checking database cache FIRST...')
 
   if (!seedKeywords || seedKeywords.length === 0) {
     console.log('[FETCH-IDEAS] Error: No seed keywords provided')
@@ -377,7 +381,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
   // If source is explicitly keywords_everywhere, use that directly
   if (source === 'keywords_everywhere') {
     try {
-      console.log('[FETCH-IDEAS] Using Keywords Everywhere API directly...')
+      console.log('[FETCH-IDEAS] STEP 2: Cache MISS - fetching from Keywords Everywhere API...')
       const keywordIdeas = await fetchFromKeywordsEverywhere(seedKeywords, geoTarget)
       const processingTimeMs = Date.now() - startTime
       console.log('[FETCH-IDEAS] Keywords Everywhere returned', keywordIdeas.length, 'keywords in', processingTimeMs, 'ms')
@@ -400,6 +404,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
   }
 
   // Try Google Ads first (if source is 'google' or 'auto')
+  // NOTE: This only runs AFTER all cache checks have failed
+  console.log('[FETCH-IDEAS] STEP 2: Cache MISS - fetching from Google Ads API...')
   try {
     const config = getGoogleAdsConfig()
 

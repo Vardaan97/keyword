@@ -184,12 +184,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         console.log(`[ANALYZE] ${batchLabel} Sending ${batchKeywords.length} keywords to AI...`, retryCount > 0 ? `[Retry ${retryCount}]` : '')
 
         try {
-          // Use fast model for analysis - try Gemini first, fallback to GPT-4o-mini if needed
+          // Use fast model for analysis - try configured model first, fallback to GPT-4o-mini if needed
           const preferredProvider: AIProvider = aiProvider || 'openrouter'
 
-          // Model selection: Gemini 2.5 Flash for primary, GPT-4o-mini as reliable fallback
+          // Model selection: Use verified working models only
+          // Primary: gemini-2.0-flash-001 (fast, 1M context, VERIFIED)
+          // Fallback: gpt-4o-mini (most reliable for JSON output)
           const fastModel = retryCount === 0
-            ? FAST_ANALYSIS_MODELS[preferredProvider] || 'google/gemini-2.5-flash'
+            ? FAST_ANALYSIS_MODELS[preferredProvider] || 'google/gemini-2.0-flash-001'
             : 'openai/gpt-4o-mini'  // Use more reliable GPT-4o-mini on retry
 
           console.log(`[ANALYZE] ${batchLabel} Using model: ${fastModel}${retryCount > 0 ? ' (fallback)' : ''}`)
