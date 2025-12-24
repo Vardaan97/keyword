@@ -2089,16 +2089,124 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* Error State */}
+                  {/* Error State - Show partial data if available */}
                   {selectedItem.status === 'error' && (
-                    <div className="p-12 flex flex-col items-center justify-center">
-                      <div className="w-12 h-12 rounded-full bg-[var(--accent-rose)]/10 flex items-center justify-center mb-4">
-                        <svg className="w-6 h-6 text-[var(--accent-rose)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                        </svg>
+                    <div className="p-6">
+                      {/* Error Banner */}
+                      <div className="mb-6 p-4 rounded-xl bg-[var(--accent-rose)]/10 border border-[var(--accent-rose)]/30">
+                        <div className="flex items-start gap-3">
+                          <div className="w-8 h-8 rounded-full bg-[var(--accent-rose)]/20 flex items-center justify-center flex-shrink-0">
+                            <svg className="w-4 h-4 text-[var(--accent-rose)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                            </svg>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[var(--accent-rose)] font-medium text-sm">Processing Error</p>
+                            <p className="text-[var(--text-muted)] text-xs mt-1 break-words">{selectedItem.error}</p>
+                          </div>
+                        </div>
                       </div>
-                      <p className="text-[var(--accent-rose)] font-medium mb-1">Error Processing</p>
-                      <p className="text-[var(--text-muted)] text-sm">{selectedItem.error}</p>
+
+                      {/* Step Progress (shows which steps completed/failed) */}
+                      {selectedItem.progress && (
+                        <div className="mb-6">
+                          <p className="text-sm font-medium text-[var(--text-secondary)] mb-3">Processing Steps</p>
+                          <div className="space-y-2">
+                            {selectedItem.progress.steps.map((step, index) => (
+                              <div key={step.id} className={`p-3 rounded-lg border ${
+                                step.status === 'completed' ? 'bg-[var(--accent-lime)]/5 border-[var(--accent-lime)]/30' :
+                                step.status === 'error' ? 'bg-[var(--accent-rose)]/10 border-[var(--accent-rose)]/30' :
+                                'bg-[var(--bg-tertiary)] border-[var(--border-subtle)]'
+                              }`}>
+                                <div className="flex items-center gap-2">
+                                  {step.status === 'completed' && (
+                                    <svg className="w-4 h-4 text-[var(--accent-lime)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                  )}
+                                  {step.status === 'error' && (
+                                    <svg className="w-4 h-4 text-[var(--accent-rose)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                  )}
+                                  {step.status === 'pending' && (
+                                    <div className="w-4 h-4 rounded-full border border-[var(--border-default)] flex items-center justify-center">
+                                      <span className="text-[8px] text-[var(--text-muted)]">{index + 1}</span>
+                                    </div>
+                                  )}
+                                  <span className={`text-sm ${
+                                    step.status === 'completed' ? 'text-[var(--accent-lime)]' :
+                                    step.status === 'error' ? 'text-[var(--accent-rose)]' :
+                                    'text-[var(--text-muted)]'
+                                  }`}>{step.label}</span>
+                                </div>
+                                {step.details && (
+                                  <p className={`text-xs mt-1 ml-6 ${
+                                    step.status === 'error' ? 'text-[var(--accent-rose)]' : 'text-[var(--text-muted)]'
+                                  }`}>{step.details}</p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Show Raw Keywords if available (even on error) */}
+                      {selectedItem.keywordIdeas && selectedItem.keywordIdeas.length > 0 && (
+                        <div>
+                          <div className="flex items-center justify-between mb-3">
+                            <p className="text-sm font-medium text-[var(--text-secondary)]">
+                              Raw Keywords from Google Ads ({selectedItem.keywordIdeas.length})
+                            </p>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => setShowRawKeywordsModal(true)}
+                                className="px-3 py-1.5 text-xs bg-[var(--accent-electric)]/20 text-[var(--accent-electric)] rounded-lg hover:bg-[var(--accent-electric)]/30 transition-colors flex items-center gap-1"
+                              >
+                                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                </svg>
+                                View All
+                              </button>
+                              <button
+                                onClick={() => {
+                                  const csvContent = [
+                                    'Keyword,Search Volume,Competition,Competition Index,Low Bid,High Bid',
+                                    ...selectedItem.keywordIdeas.map(kw =>
+                                      `"${kw.keyword}",${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex},${kw.lowTopOfPageBidMicros || ''},${kw.highTopOfPageBidMicros || ''}`
+                                    )
+                                  ].join('\n')
+                                  downloadCSV(csvContent, `raw-keywords-${selectedItem.courseInput.courseName.replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.csv`)
+                                }}
+                                className="px-3 py-1.5 text-xs bg-[var(--accent-lime)]/20 text-[var(--accent-lime)] rounded-lg hover:bg-[var(--accent-lime)]/30 transition-colors flex items-center gap-1"
+                              >
+                                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                </svg>
+                                Export CSV
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-xs text-[var(--text-muted)]">
+                            Keywords were fetched from Google Ads before the error occurred. You can still view and export them.
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Show Seeds if available */}
+                      {selectedItem.seedKeywords && selectedItem.seedKeywords.length > 0 && (
+                        <div className="mt-4 pt-4 border-t border-[var(--border-subtle)]">
+                          <p className="text-xs font-medium text-[var(--text-muted)] mb-2">Generated Seeds ({selectedItem.seedKeywords.length})</p>
+                          <div className="flex flex-wrap gap-1">
+                            {selectedItem.seedKeywords.map((seed, i) => (
+                              <span key={i} className="px-2 py-0.5 bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-xs rounded">
+                                {seed.keyword}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 

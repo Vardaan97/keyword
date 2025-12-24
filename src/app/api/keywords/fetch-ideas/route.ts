@@ -263,7 +263,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       }
     }
 
-    // Fallback to seed-based cache
+    // Fallback to seed-based cache (exact match)
     try {
       const cached = await getCachedKeywords(seedKeywords, geoTarget, source)
       if (cached && cached.length > 0) {
@@ -289,6 +289,41 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       }
     } catch (cacheError) {
       console.log('[FETCH-IDEAS] Seeds cache check failed:', cacheError)
+    }
+
+    // Check for partial seed match (if 3+ seeds match an existing cache entry)
+    // This helps when similar courses have overlapping seed keywords
+    if (seedKeywords.length >= 3) {
+      try {
+        // Try with first 3 seeds sorted (most likely to match across similar courses)
+        const partialSeeds = seedKeywords.slice(0, 3).sort()
+        const partialCacheKey = `partial_${partialSeeds.join(',')}_${geoTarget}_${source}`
+        const partialCached = await getCachedKeywords([partialCacheKey], geoTarget, source)
+
+        if (partialCached && partialCached.length > 0) {
+          const processingTimeMs = Date.now() - startTime
+          console.log('[FETCH-IDEAS] Cache hit (partial-seeds)!', partialCached.length, 'keywords in', processingTimeMs, 'ms')
+
+          const keywordIdeas: KeywordIdea[] = partialCached.map(kw => ({
+            keyword: kw.keyword,
+            avgMonthlySearches: kw.avgMonthlySearches,
+            competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
+            competitionIndex: kw.competitionIndex,
+            lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+            highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+            bidCurrency: 'INR',
+            inAccount: kw.inAccount
+          }))
+
+          return NextResponse.json({
+            success: true,
+            data: keywordIdeas,
+            meta: { source: 'cache', cached: true, processingTimeMs, databases: dbStatus, cacheKey: 'partial-seeds' }
+          })
+        }
+      } catch (partialError) {
+        console.log('[FETCH-IDEAS] Partial seeds cache check failed:', partialError)
+      }
     }
   }
 
@@ -319,6 +354,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       if (courseHash) {
         await setCachedKeywords([`course_${courseHash}_${geoTarget}_${actualSource}`], geoTarget, actualSource, keywordData)
         console.log(`[FETCH-IDEAS] Saved course-based cache: course_${courseHash}`)
+      }
+
+      // Save partial seeds cache (first 3 seeds) for fuzzy matching
+      if (seedKeywords.length >= 3) {
+        const partialSeeds = seedKeywords.slice(0, 3).sort()
+        const partialCacheKey = `partial_${partialSeeds.join(',')}_${geoTarget}_${actualSource}`
+        await setCachedKeywords([partialCacheKey], geoTarget, actualSource, keywordData)
+        console.log(`[FETCH-IDEAS] Saved partial-seeds cache: ${partialSeeds.slice(0, 2).join(', ')}...`)
       }
 
       // Also save individual keyword volumes for future lookups (7 day TTL)

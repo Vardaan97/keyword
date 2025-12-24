@@ -187,10 +187,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
           // Use fast model for analysis - try Gemini first, fallback to GPT-4o-mini if needed
           const preferredProvider: AIProvider = aiProvider || 'openrouter'
 
-          // Model selection: Gemini 3 Flash is fastest, but GPT-4o-mini is more reliable for JSON
-          // We try the fast model first, and the route has retry logic that will try alternatives
+          // Model selection: Gemini 2.5 Flash for primary, GPT-4o-mini as reliable fallback
           const fastModel = retryCount === 0
-            ? FAST_ANALYSIS_MODELS[preferredProvider] || 'google/gemini-2.0-flash-001'
+            ? FAST_ANALYSIS_MODELS[preferredProvider] || 'google/gemini-2.5-flash'
             : 'openai/gpt-4o-mini'  // Use more reliable GPT-4o-mini on retry
 
           console.log(`[ANALYZE] ${batchLabel} Using model: ${fastModel}${retryCount > 0 ? ' (fallback)' : ''}`)
@@ -214,7 +213,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                 }
               ],
               temperature: 0.2,  // Lower temperature for more consistent JSON output
-              maxTokens: 32000,  // Reduced for reliability - still enough for 500+ keywords
+              maxTokens: 45000,  // Gemini 2.5 Flash supports up to 65K, using 45K for safety
               jsonMode: true,
               model: fastModel
             },
