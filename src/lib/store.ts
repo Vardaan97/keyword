@@ -140,8 +140,8 @@ export const useAppStore = create<AppState>()(
       setDataSource: (source) => set({ dataSource: source }),
       setTargetCountry: (country) => set({ targetCountry: country }),
 
-      // Google Ads Account Selection (default to Bouquet INR - has most keywords)
-      selectedGoogleAdsAccountId: 'bouquet-inr',
+      // Google Ads Account Selection (default to Flexi - primary focus for keyword research)
+      selectedGoogleAdsAccountId: 'flexi',
       setSelectedGoogleAdsAccountId: (accountId) => set({ selectedGoogleAdsAccountId: accountId }),
       getSelectedGoogleAdsAccount: () => {
         const accountId = get().selectedGoogleAdsAccountId

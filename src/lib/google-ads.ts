@@ -1,8 +1,18 @@
 import { KeywordIdea } from '@/types'
+import { createClient } from '@supabase/supabase-js'
 
 // Google Ads API v22 (latest as of December 2025)
 // v18 sunset, v19/v20/v21 still active, v22 is current
 const GOOGLE_ADS_API_VERSION = 'v22'
+
+// Supabase client for faster keyword lookups from imported data
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+function getSupabaseClient() {
+  if (!supabaseUrl || !supabaseKey) return null
+  return createClient(supabaseUrl, supabaseKey)
+}
 
 // Per-account cache for keywords (refreshed every 10 minutes)
 const accountKeywordsCacheMap: Map<string, { keywords: Set<string>; timestamp: number }> = new Map()
@@ -19,12 +29,13 @@ export interface GoogleAdsAccount {
 
 // Available accounts under the MCC (Manager account)
 // These are the sub-accounts accessible via the login customer ID
-// Priority: Higher number = check first (Bouquet INR has most keywords)
+// Priority: Higher number = check first for "in account" status
+// Flexi is the primary focus account for keyword research
 export const GOOGLE_ADS_ACCOUNTS: GoogleAdsAccount[] = [
-  { id: 'all-accounts', name: 'All Accounts', customerId: 'ALL', currency: 'INR' },  // Special option to check all accounts
-  { id: 'bouquet-inr', name: 'Bouquet INR', customerId: '6153038296', currency: 'INR', priority: 3 },  // Default - most keywords
-  { id: 'bouquet-inr-2', name: 'Bouquet INR - 2', customerId: '6601080005', currency: 'INR', priority: 2 },
-  { id: 'flexi', name: 'Flexi', customerId: '3515012934', currency: 'INR', priority: 1 }
+  { id: 'all-accounts', name: 'All Accounts', customerId: 'ALL', currency: 'INR' },  // Check all accounts
+  { id: 'flexi', name: 'Flexi', customerId: '3515012934', currency: 'INR', priority: 3 },  // Primary focus - default
+  { id: 'bouquet-inr', name: 'Bouquet INR', customerId: '6153038296', currency: 'INR', priority: 2 },
+  { id: 'bouquet-inr-2', name: 'Bouquet INR - 2', customerId: '6601080005', currency: 'INR', priority: 1 }
 ]
 
 // Get all real account IDs (excluding the "ALL" option)
@@ -55,6 +66,7 @@ interface KeywordPlannerRequest {
 /**
  * Fetch all keywords currently in a specific Google Ads account
  * Uses per-account caching to support multiple sub-accounts under MCC
+ * Implements pagination to get ALL keywords (not limited to 10k)
  */
 async function getAccountKeywords(config: GoogleAdsConfig, customerId: string): Promise<Set<string>> {
   const cleanCustomerId = customerId.replace(/-/g, '')
@@ -66,64 +78,88 @@ async function getAccountKeywords(config: GoogleAdsConfig, customerId: string): 
     return cached.keywords
   }
 
-  console.log(`[GOOGLE-ADS] Fetching keywords for account ${cleanCustomerId}...`)
+  console.log(`[GOOGLE-ADS] Fetching ALL keywords for account ${cleanCustomerId}...`)
   const accessToken = await getAccessToken(config)
   const loginCustomerId = config.loginCustomerId.replace(/-/g, '')
 
-  // Query to get all active keywords in the account
-  const query = `
-    SELECT
-      ad_group_criterion.keyword.text
-    FROM keyword_view
-    WHERE ad_group_criterion.status != 'REMOVED'
-    LIMIT 10000
-  `
+  const keywords = new Set<string>()
+  let pageToken: string | undefined = undefined
+  let pageCount = 0
+  const PAGE_SIZE = 10000
 
-  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${cleanCustomerId}/googleAds:search`
+  // Pagination loop to get ALL keywords
+  do {
+    pageCount++
+    console.log(`[GOOGLE-ADS] Fetching page ${pageCount} for account ${cleanCustomerId}...`)
 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'developer-token': config.developerToken,
-        'login-customer-id': loginCustomerId,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ query })
-    })
+    // Query to get all active keywords in the account
+    // Using ad_group_criterion directly for more reliable results
+    const query = `
+      SELECT
+        ad_group_criterion.keyword.text,
+        ad_group_criterion.keyword.match_type
+      FROM ad_group_criterion
+      WHERE ad_group_criterion.type = 'KEYWORD'
+        AND ad_group_criterion.status != 'REMOVED'
+        AND ad_group_criterion.negative = FALSE
+      ORDER BY ad_group_criterion.keyword.text
+      LIMIT ${PAGE_SIZE}
+    `
 
-    if (!response.ok) {
-      const error = await response.json()
-      console.error(`[GOOGLE-ADS] Failed to fetch keywords for account ${cleanCustomerId}:`, error.error?.message || 'Unknown error')
-      return new Set()
-    }
+    const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${cleanCustomerId}/googleAds:search`
 
-    const data = await response.json()
-    const keywords = new Set<string>()
-
-    if (data.results) {
-      for (const result of data.results) {
-        const keywordText = result.adGroupCriterion?.keyword?.text
-        if (keywordText) {
-          keywords.add(keywordText.toLowerCase())
-        }
+    try {
+      const requestBody: Record<string, unknown> = { query }
+      if (pageToken) {
+        requestBody.pageToken = pageToken
       }
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'developer-token': config.developerToken,
+          'login-customer-id': loginCustomerId,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        console.error(`[GOOGLE-ADS] Failed to fetch keywords for account ${cleanCustomerId}:`, error.error?.message || 'Unknown error')
+        break
+      }
+
+      const data = await response.json()
+
+      if (data.results) {
+        for (const result of data.results) {
+          const keywordText = result.adGroupCriterion?.keyword?.text
+          if (keywordText) {
+            keywords.add(keywordText.toLowerCase())
+          }
+        }
+        console.log(`[GOOGLE-ADS] Page ${pageCount}: Got ${data.results.length} keywords, total so far: ${keywords.size}`)
+      }
+
+      // Check for next page
+      pageToken = data.nextPageToken
+    } catch (error) {
+      console.error(`[GOOGLE-ADS] Error fetching keywords page ${pageCount} for account ${cleanCustomerId}:`, error)
+      break
     }
+  } while (pageToken && pageCount < 10) // Safety limit of 10 pages (100k keywords max)
 
-    console.log(`[GOOGLE-ADS] Found ${keywords.size} keywords in account ${cleanCustomerId}`)
+  console.log(`[GOOGLE-ADS] TOTAL: Found ${keywords.size} keywords in account ${cleanCustomerId} (${pageCount} pages)`)
 
-    // Update per-account cache
-    accountKeywordsCacheMap.set(cleanCustomerId, {
-      keywords,
-      timestamp: Date.now()
-    })
+  // Update per-account cache
+  accountKeywordsCacheMap.set(cleanCustomerId, {
+    keywords,
+    timestamp: Date.now()
+  })
 
-    return keywords
-  } catch (error) {
-    console.error(`[GOOGLE-ADS] Error fetching keywords for account ${cleanCustomerId}:`, error)
-    return new Set()
-  }
+  return keywords
 }
 
 /**
@@ -133,6 +169,143 @@ export function getAccountName(customerId: string): string {
   const cleanId = customerId.replace(/-/g, '')
   const account = GOOGLE_ADS_ACCOUNTS.find(acc => acc.customerId === cleanId)
   return account?.name || `Account ${cleanId}`
+}
+
+/**
+ * Get all keywords from Supabase for a specific account
+ * This uses our imported Google Ads data for faster lookups
+ * Returns: Map of lowercase keyword -> { accountName, matchType }
+ */
+export async function getKeywordsFromSupabase(customerId?: string): Promise<Map<string, { accountName: string; matchType: string | null }>> {
+  const supabase = getSupabaseClient()
+  if (!supabase) {
+    console.log('[GOOGLE-ADS-SUPABASE] Supabase not configured, skipping')
+    return new Map()
+  }
+
+  console.log('[GOOGLE-ADS-SUPABASE] Fetching keywords from Supabase...')
+
+  try {
+    // Query keywords with their account info
+    let query = supabase
+      .from('gads_keywords')
+      .select(`
+        keyword_text,
+        match_type,
+        gads_ad_groups!inner (
+          gads_campaigns!inner (
+            gads_accounts!inner (
+              customer_id,
+              name
+            )
+          )
+        )
+      `)
+      .neq('status', 'Removed')
+      .limit(50000) // Get all keywords
+
+    if (customerId) {
+      const cleanId = customerId.replace(/-/g, '')
+      // Filter by customer_id if specified
+      query = query.eq('gads_ad_groups.gads_campaigns.gads_accounts.customer_id', cleanId)
+    }
+
+    const { data, error } = await query
+
+    if (error) {
+      console.error('[GOOGLE-ADS-SUPABASE] Error fetching keywords:', error.message)
+      return new Map()
+    }
+
+    const keywordMap = new Map<string, { accountName: string; matchType: string | null }>()
+
+    if (data) {
+      for (const kw of data) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const adGroup = kw.gads_ad_groups as any
+        const accountName = adGroup?.gads_campaigns?.gads_accounts?.name || 'Unknown'
+        const keywordText = kw.keyword_text?.toLowerCase()
+        if (keywordText) {
+          keywordMap.set(keywordText, {
+            accountName,
+            matchType: kw.match_type
+          })
+        }
+      }
+    }
+
+    console.log(`[GOOGLE-ADS-SUPABASE] Found ${keywordMap.size} keywords in Supabase`)
+    return keywordMap
+  } catch (error) {
+    console.error('[GOOGLE-ADS-SUPABASE] Error:', error)
+    return new Map()
+  }
+}
+
+/**
+ * Check if keywords exist in any account using Supabase
+ * Returns: Map of keyword -> array of account names that contain it
+ */
+export async function checkKeywordsInAccounts(keywords: string[]): Promise<Map<string, string[]>> {
+  const supabase = getSupabaseClient()
+  if (!supabase || keywords.length === 0) {
+    return new Map()
+  }
+
+  console.log(`[GOOGLE-ADS-SUPABASE] Checking ${keywords.length} keywords against Supabase...`)
+
+  try {
+    // Normalize keywords to lowercase for comparison
+    const normalizedKeywords = keywords.map(k => k.toLowerCase())
+
+    // Query all matching keywords
+    const { data, error } = await supabase
+      .from('gads_keywords')
+      .select(`
+        keyword_text,
+        gads_ad_groups!inner (
+          gads_campaigns!inner (
+            gads_accounts!inner (
+              name
+            )
+          )
+        )
+      `)
+      .in('keyword_text', normalizedKeywords)
+      .neq('status', 'Removed')
+
+    if (error) {
+      console.error('[GOOGLE-ADS-SUPABASE] Error checking keywords:', error.message)
+      return new Map()
+    }
+
+    const resultMap = new Map<string, string[]>()
+
+    if (data) {
+      for (const kw of data) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const adGroup = kw.gads_ad_groups as any
+        const accountName = adGroup?.gads_campaigns?.gads_accounts?.name || 'Unknown'
+        const keywordText = kw.keyword_text?.toLowerCase()
+
+        if (keywordText) {
+          if (!resultMap.has(keywordText)) {
+            resultMap.set(keywordText, [])
+          }
+          const accounts = resultMap.get(keywordText)!
+          if (!accounts.includes(accountName)) {
+            accounts.push(accountName)
+          }
+        }
+      }
+    }
+
+    console.log(`[GOOGLE-ADS-SUPABASE] Found ${resultMap.size} keywords in accounts`)
+    return resultMap
+  } catch (error) {
+    console.error('[GOOGLE-ADS-SUPABASE] Error:', error)
+    return new Map()
+  }
 }
 
 // Map to track which accounts contain which keywords (keyword -> account names)
@@ -149,7 +322,7 @@ export async function getKeywordIdeas(
   console.log('[GOOGLE-ADS] Check All Accounts:', request.checkAllAccounts || false)
 
   // Fetch account keywords - either from single account or all accounts
-  let accountKeywords: Set<string>
+  let accountKeywords: Set<string> = new Set()
   // Map keyword -> list of account names that contain it
   const keywordToAccounts: AccountKeywordsMap = new Map()
   const accessToken = await getAccessToken(config)
@@ -158,19 +331,43 @@ export async function getKeywordIdeas(
   const currentAccount = GOOGLE_ADS_ACCOUNTS.find(acc => acc.customerId === request.customerId.replace(/-/g, ''))
   const bidCurrency = currentAccount?.currency || 'INR'
 
+  // STEP 1: First check Supabase for imported keywords (faster and more reliable for imported data like Flexi)
+  console.log('[GOOGLE-ADS] STEP 1: Checking Supabase for imported keywords...')
+  try {
+    const supabaseKeywords = await getKeywordsFromSupabase()
+    if (supabaseKeywords.size > 0) {
+      console.log(`[GOOGLE-ADS] Found ${supabaseKeywords.size} keywords in Supabase`)
+      for (const [kw, info] of supabaseKeywords) {
+        accountKeywords.add(kw)
+        if (!keywordToAccounts.has(kw)) {
+          keywordToAccounts.set(kw, new Set())
+        }
+        keywordToAccounts.get(kw)!.add(info.accountName)
+      }
+    }
+  } catch (supabaseError) {
+    console.log('[GOOGLE-ADS] Supabase check failed, continuing with API:', supabaseError)
+  }
+
+  // STEP 2: Also fetch from Google Ads API (for accounts not in Supabase)
+  console.log('[GOOGLE-ADS] STEP 2: Fetching from Google Ads API...')
   if (request.checkAllAccounts && request.allAccountIds && request.allAccountIds.length > 0) {
     // Fetch keywords from all accounts in parallel and track which account has each keyword
-    console.log(`[GOOGLE-ADS] Fetching keywords from ${request.allAccountIds.length} accounts...`)
+    console.log(`[GOOGLE-ADS] Fetching keywords from ${request.allAccountIds.length} accounts via API...`)
     const accountResults = await Promise.all(
       request.allAccountIds.map(async (accId) => {
-        const keywords = await getAccountKeywords(config, accId)
-        const accountName = getAccountName(accId)
-        return { accId, accountName, keywords }
+        try {
+          const keywords = await getAccountKeywords(config, accId)
+          const accountName = getAccountName(accId)
+          return { accId, accountName, keywords }
+        } catch (error) {
+          console.error(`[GOOGLE-ADS] Failed to fetch from account ${accId}:`, error)
+          return { accId, accountName: getAccountName(accId), keywords: new Set<string>() }
+        }
       })
     )
 
     // Combine all keywords and track which accounts have each keyword
-    accountKeywords = new Set<string>()
     for (const { accountName, keywords } of accountResults) {
       for (const kw of keywords) {
         accountKeywords.add(kw)
@@ -181,18 +378,26 @@ export async function getKeywordIdeas(
         keywordToAccounts.get(kw)!.add(accountName)
       }
     }
-    console.log('[GOOGLE-ADS] Combined keywords from all accounts:', accountKeywords.size, 'unique keywords')
+    console.log('[GOOGLE-ADS] Combined keywords from all sources:', accountKeywords.size, 'unique keywords')
   } else {
-    // Single account mode
-    accountKeywords = await getAccountKeywords(config, request.customerId)
-    const accountName = getAccountName(request.customerId)
-    // Track all keywords as belonging to this single account
-    for (const kw of accountKeywords) {
-      keywordToAccounts.set(kw, new Set([accountName]))
+    // Single account mode - still fetch from API to supplement Supabase data
+    try {
+      const apiKeywords = await getAccountKeywords(config, request.customerId)
+      const accountName = getAccountName(request.customerId)
+      for (const kw of apiKeywords) {
+        accountKeywords.add(kw)
+        if (!keywordToAccounts.has(kw)) {
+          keywordToAccounts.set(kw, new Set())
+        }
+        keywordToAccounts.get(kw)!.add(accountName)
+      }
+      console.log('[GOOGLE-ADS] Account keywords loaded (API + Supabase):', accountKeywords.size, 'keywords')
+    } catch (apiError) {
+      console.log('[GOOGLE-ADS] API fetch failed, using Supabase data only:', apiError)
     }
-    console.log('[GOOGLE-ADS] Account keywords loaded:', accountKeywords.size, 'keywords')
   }
 
+  console.log('[GOOGLE-ADS] TOTAL unique keywords in accounts:', accountKeywords.size)
   console.log('[GOOGLE-ADS] Access token obtained successfully')
 
   const customerId = request.customerId.replace(/-/g, '')
