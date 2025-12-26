@@ -53,6 +53,93 @@ function updateStep(
   }
 }
 
+// Pre-filter keywords before AI analysis (rule-based, instant filtering)
+// This reduces the number of keywords sent to AI, significantly speeding up analysis
+const EXCLUSION_TERMS = [
+  'free', 'salary', 'jobs', 'job', 'careers', 'career',
+  'dumps', 'torrent', 'pirate', 'crack', 'download',
+  'youtube', 'udemy', 'coursera', 'simplilearn', 'edureka', 'pluralsight',
+  'reddit', 'quora', 'stackoverflow',
+  'vs ', ' vs',
+  'alternative', 'alternatives',
+  'review', 'reviews', 'reddit review',
+  'worth it', 'scam', 'legit',
+  'glassdoor', 'indeed', 'linkedin'
+]
+
+const MIN_VOLUME_FOR_AI = 10 // Skip very low volume keywords from AI analysis
+
+interface PreFilterResult {
+  forAI: KeywordIdea[]
+  excluded: AnalyzedKeyword[]
+}
+
+function preFilterKeywords(keywords: KeywordIdea[], courseName: string): PreFilterResult {
+  const forAI: KeywordIdea[] = []
+  const excluded: AnalyzedKeyword[] = []
+
+  for (const kw of keywords) {
+    const lowerKeyword = kw.keyword.toLowerCase()
+
+    // Check for exclusion terms
+    const excludedTerm = EXCLUSION_TERMS.find(term => lowerKeyword.includes(term))
+    if (excludedTerm) {
+      excluded.push({
+        ...kw,
+        courseRelevance: 0,
+        relevanceStatus: 'NOT_RELEVANT',
+        conversionPotential: 0,
+        searchIntent: 0,
+        vendorSpecificity: 0,
+        keywordSpecificity: 0,
+        actionWordStrength: 0,
+        commercialSignals: 0,
+        negativeSignals: 0,
+        koenigFit: 0,
+        baseScore: 0,
+        competitionBonus: 0,
+        finalScore: 0,
+        tier: 'Exclude',
+        matchType: 'N/A',
+        action: 'EXCLUDE',
+        exclusionReason: `Contains excluded term: "${excludedTerm}"`
+      })
+      continue
+    }
+
+    // Check minimum volume (skip extremely low volume for AI)
+    if (kw.avgMonthlySearches < MIN_VOLUME_FOR_AI) {
+      excluded.push({
+        ...kw,
+        courseRelevance: 0,
+        relevanceStatus: 'NOT_RELEVANT',
+        conversionPotential: 0,
+        searchIntent: 0,
+        vendorSpecificity: 0,
+        keywordSpecificity: 0,
+        actionWordStrength: 0,
+        commercialSignals: 0,
+        negativeSignals: 0,
+        koenigFit: 0,
+        baseScore: 0,
+        competitionBonus: 0,
+        finalScore: 0,
+        tier: 'Exclude',
+        matchType: 'N/A',
+        action: 'EXCLUDE',
+        exclusionReason: `Very low search volume (${kw.avgMonthlySearches})`
+      })
+      continue
+    }
+
+    // Keyword passes pre-filter, send to AI
+    forAI.push(kw)
+  }
+
+  console.log(`[PRE-FILTER] ${keywords.length} total -> ${forAI.length} for AI, ${excluded.length} excluded by rules`)
+  return { forAI, excluded }
+}
+
 export default function Home() {
   const {
     seedPrompt,
@@ -443,8 +530,10 @@ export default function Home() {
     return updatedItem
   }
 
-  // Rate limiting delay for Google Ads API (5 seconds between requests)
-  const GOOGLE_API_DELAY_MS = 5000
+  // Rate limiting delay for Google Ads API
+  // Reduced from 5s to 1.5s since google-ads.ts already has 1.1s rate limiting
+  // This is only applied when we need to call the Google API (not on cache hits)
+  const GOOGLE_API_DELAY_MS = 1500
 
   // Helper to delay execution
   const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
@@ -668,34 +757,49 @@ export default function Home() {
 
       if (signal.aborted) throw new Error('Processing stopped by user')
 
-      // ========== STEP 5: Analyze Keywords (Gemini 2.0 Flash - stable & fast) ==========
+      // ========== STEP 5: Analyze Keywords (with pre-filtering for speed) ==========
       const totalKeywords = keywordsResult.data.length
-      updateProgress('analyze', 'in_progress', `Analyzing ${totalKeywords} keywords with AI...`, 5)
 
-      console.log(`[STEP 3] Analyzing ${totalKeywords} keywords with Gemini 2.0 Flash`)
+      // Pre-filter keywords using rule-based exclusions (instant, reduces AI load)
+      const { forAI, excluded: preExcluded } = preFilterKeywords(keywordsResult.data, item.courseInput.courseName)
 
-      const analyzeResponse = await fetch('/api/keywords/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: analysisPrompt.prompt,
-          courseName: item.courseInput.courseName,
-          certificationCode: item.courseInput.certificationCode,
-          vendor: item.courseInput.primaryVendor,
-          relatedTerms: item.courseInput.relatedTerms?.join(', '),
-          keywords: keywordsResult.data
-        }),
-        signal
-      })
-      const analyzeResult = await analyzeResponse.json()
+      updateProgress('analyze', 'in_progress', `Pre-filtered: ${forAI.length}/${totalKeywords} for AI analysis...`, 5)
 
-      if (!analyzeResult.success) {
-        updateProgress('analyze', 'error', analyzeResult.error)
-        throw new Error(analyzeResult.error)
+      console.log(`[STEP 3] Pre-filter: ${totalKeywords} total -> ${forAI.length} for AI, ${preExcluded.length} excluded by rules`)
+
+      let analyzedFromAI: AnalyzedKeyword[] = []
+
+      // Only call AI if we have keywords to analyze
+      if (forAI.length > 0) {
+        console.log(`[STEP 3] Sending ${forAI.length} keywords to AI for analysis...`)
+
+        const analyzeResponse = await fetch('/api/keywords/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: analysisPrompt.prompt,
+            courseName: item.courseInput.courseName,
+            certificationCode: item.courseInput.certificationCode,
+            vendor: item.courseInput.primaryVendor,
+            relatedTerms: item.courseInput.relatedTerms?.join(', '),
+            keywords: forAI
+          }),
+          signal
+        })
+        const analyzeResult = await analyzeResponse.json()
+
+        if (!analyzeResult.success) {
+          updateProgress('analyze', 'error', analyzeResult.error)
+          throw new Error(analyzeResult.error)
+        }
+
+        analyzedFromAI = analyzeResult.data?.analyzedKeywords || []
       }
 
-      const analyzedCount = analyzeResult.data?.analyzedKeywords?.length || 0
-      updateProgress('analyze', 'completed', `Analyzed ${analyzedCount} keywords`)
+      // Combine AI results with pre-excluded keywords
+      const allAnalyzed = [...analyzedFromAI, ...preExcluded]
+      const analyzedCount = allAnalyzed.length
+      updateProgress('analyze', 'completed', `Analyzed ${analyzedFromAI.length} keywords (${preExcluded.length} auto-excluded)`)
 
       // ========== STEP 6: Complete ==========
       const endTime = Date.now()
@@ -705,12 +809,12 @@ export default function Home() {
 
       updatedItem = {
         ...updatedItem,
-        analyzedKeywords: analyzeResult.data.analyzedKeywords,
+        analyzedKeywords: allAnalyzed, // Use combined results (AI + pre-excluded)
         status: 'completed',
         endTime,
         processingTimeMs: processingTime
       }
-      console.log(`[COMPLETE] Finished: ${item.courseInput.courseName} - ${analyzedCount} keywords in ${formatTime(processingTime)}`)
+      console.log(`[COMPLETE] Finished: ${item.courseInput.courseName} - ${allAnalyzed.length} keywords total (${analyzedFromAI.length} AI + ${preExcluded.length} auto-excluded) in ${formatTime(processingTime)}`)
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'

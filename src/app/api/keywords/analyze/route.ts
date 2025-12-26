@@ -201,13 +201,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
               messages: [
                 {
                   role: 'system',
-                  content: `You are a keyword analysis expert. Follow the user's instructions exactly.
+                  content: `You are a keyword analysis expert for IT training courses. Analyze keywords for relevance and commercial potential.
 
 CRITICAL OUTPUT REQUIREMENTS:
-1. Return ONLY valid JSON - no markdown code blocks, no text before or after the JSON
-2. Start your response directly with { and end with }
-3. Analyze ALL ${batchKeywords.length} keywords provided - do not skip any
-4. Ensure the JSON is complete with proper closing brackets`
+1. Return ONLY valid JSON - no markdown, no code blocks, no extra text
+2. Start directly with { and end with }
+3. IMPORTANT: You MUST analyze ALL ${batchKeywords.length} keywords - return EXACTLY ${batchKeywords.length} items in the analyzedKeywords array
+4. Do NOT skip any keywords - every single input keyword must appear in your output
+5. Ensure the JSON is complete with proper closing brackets
+6. If a keyword seems irrelevant, still include it with action: "EXCLUDE" and provide exclusionReason`
                 },
                 {
                   role: 'user',
@@ -258,45 +260,123 @@ CRITICAL OUTPUT REQUIREMENTS:
           }
 
           const analyzedCount = analysisResult.analyzedKeywords?.length || 0
-          console.log(`[ANALYZE] ${batchLabel} Parsed ${analyzedCount} keywords`)
+          console.log(`[ANALYZE] ${batchLabel} Parsed ${analyzedCount} keywords from AI (sent ${batchKeywords.length})`)
 
           if (analysisResult.analyzedKeywords && Array.isArray(analysisResult.analyzedKeywords)) {
-            return analysisResult.analyzedKeywords.map((analyzed: Partial<AnalyzedKeyword>) => {
-              const original = batchKeywords.find(k =>
-                k.keyword.toLowerCase() === analyzed.keyword?.toLowerCase()
-              )
-              return {
-                keyword: analyzed.keyword || '',
-                avgMonthlySearches: original?.avgMonthlySearches || analyzed.avgMonthlySearches || 0,
-                competition: original?.competition || analyzed.competition || 'UNSPECIFIED',
-                competitionIndex: original?.competitionIndex || analyzed.competitionIndex || 0,
-                lowTopOfPageBidMicros: original?.lowTopOfPageBidMicros,
-                highTopOfPageBidMicros: original?.highTopOfPageBidMicros,
-                inAccount: original?.inAccount,
-                courseRelevance: analyzed.courseRelevance || 0,
-                relevanceStatus: analyzed.relevanceStatus || 'NOT_RELEVANT',
-                conversionPotential: analyzed.conversionPotential || 0,
-                searchIntent: analyzed.searchIntent || 0,
-                vendorSpecificity: analyzed.vendorSpecificity || 0,
-                keywordSpecificity: analyzed.keywordSpecificity || 0,
-                actionWordStrength: analyzed.actionWordStrength || 0,
-                commercialSignals: analyzed.commercialSignals || 0,
-                negativeSignals: analyzed.negativeSignals || 10,
-                koenigFit: analyzed.koenigFit || 0,
-                baseScore: analyzed.baseScore || 0,
-                competitionBonus: analyzed.competitionBonus || 0,
-                finalScore: analyzed.finalScore || 0,
-                tier: analyzed.tier || 'Exclude',
-                matchType: analyzed.matchType || 'N/A',
-                action: analyzed.action || 'EXCLUDE',
-                exclusionReason: analyzed.exclusionReason,
-                priority: analyzed.priority
-              } as AnalyzedKeyword
+            // Create a map of AI-analyzed keywords (case-insensitive)
+            const analyzedMap = new Map<string, Partial<AnalyzedKeyword>>()
+            for (const analyzed of analysisResult.analyzedKeywords) {
+              if (analyzed.keyword) {
+                analyzedMap.set(analyzed.keyword.toLowerCase(), analyzed)
+              }
+            }
+
+            // Process ALL batch keywords - use AI analysis if available, otherwise mark for review
+            const allKeywords: AnalyzedKeyword[] = batchKeywords.map(original => {
+              const analyzed = analyzedMap.get(original.keyword.toLowerCase())
+
+              if (analyzed) {
+                // AI analyzed this keyword - use its scores
+                return {
+                  keyword: original.keyword,
+                  avgMonthlySearches: original.avgMonthlySearches,
+                  competition: original.competition,
+                  competitionIndex: original.competitionIndex,
+                  lowTopOfPageBidMicros: original.lowTopOfPageBidMicros,
+                  highTopOfPageBidMicros: original.highTopOfPageBidMicros,
+                  inAccount: original.inAccount,
+                  courseRelevance: analyzed.courseRelevance || 5,
+                  relevanceStatus: analyzed.relevanceStatus || 'RELATED',
+                  conversionPotential: analyzed.conversionPotential || 5,
+                  searchIntent: analyzed.searchIntent || 5,
+                  vendorSpecificity: analyzed.vendorSpecificity || 5,
+                  keywordSpecificity: analyzed.keywordSpecificity || 5,
+                  actionWordStrength: analyzed.actionWordStrength || 5,
+                  commercialSignals: analyzed.commercialSignals || 5,
+                  negativeSignals: analyzed.negativeSignals || 8,
+                  koenigFit: analyzed.koenigFit || 5,
+                  baseScore: analyzed.baseScore || 50,
+                  competitionBonus: analyzed.competitionBonus || 0,
+                  finalScore: analyzed.finalScore || 50,
+                  tier: analyzed.tier || 'Review',
+                  matchType: analyzed.matchType || 'PHRASE',
+                  action: analyzed.action || 'REVIEW',
+                  exclusionReason: analyzed.exclusionReason,
+                  priority: analyzed.priority
+                } as AnalyzedKeyword
+              } else {
+                // AI skipped this keyword - mark for manual review with neutral scores
+                const competitionBonus = original.competition === 'LOW' ? 10 : original.competition === 'MEDIUM' ? 5 : 0
+                const baseScore = 45 // Neutral score
+                return {
+                  keyword: original.keyword,
+                  avgMonthlySearches: original.avgMonthlySearches,
+                  competition: original.competition,
+                  competitionIndex: original.competitionIndex,
+                  lowTopOfPageBidMicros: original.lowTopOfPageBidMicros,
+                  highTopOfPageBidMicros: original.highTopOfPageBidMicros,
+                  inAccount: original.inAccount,
+                  courseRelevance: 5,
+                  relevanceStatus: 'RELATED' as const,
+                  conversionPotential: 5,
+                  searchIntent: 5,
+                  vendorSpecificity: 5,
+                  keywordSpecificity: 5,
+                  actionWordStrength: 5,
+                  commercialSignals: 5,
+                  negativeSignals: 8,
+                  koenigFit: 5,
+                  baseScore,
+                  competitionBonus,
+                  finalScore: baseScore + competitionBonus,
+                  tier: 'Review' as const,
+                  matchType: 'PHRASE' as const,
+                  action: 'REVIEW' as const,
+                  exclusionReason: undefined,
+                  priority: '🔵 REVIEW' as const
+                } as AnalyzedKeyword
+              }
             })
+
+            const skippedCount = batchKeywords.length - analyzedMap.size
+            if (skippedCount > 0) {
+              console.log(`[ANALYZE] ${batchLabel} AI skipped ${skippedCount} keywords - marked for REVIEW`)
+            }
+
+            return allKeywords
           }
 
-          console.warn(`[ANALYZE] ${batchLabel} No analyzedKeywords array in response`)
-          return []
+          // If no AI response, mark ALL keywords for review
+          console.warn(`[ANALYZE] ${batchLabel} No analyzedKeywords array - marking all ${batchKeywords.length} for REVIEW`)
+          return batchKeywords.map(original => {
+            const competitionBonus = original.competition === 'LOW' ? 10 : original.competition === 'MEDIUM' ? 5 : 0
+            return {
+              keyword: original.keyword,
+              avgMonthlySearches: original.avgMonthlySearches,
+              competition: original.competition,
+              competitionIndex: original.competitionIndex,
+              lowTopOfPageBidMicros: original.lowTopOfPageBidMicros,
+              highTopOfPageBidMicros: original.highTopOfPageBidMicros,
+              inAccount: original.inAccount,
+              courseRelevance: 5,
+              relevanceStatus: 'RELATED' as const,
+              conversionPotential: 5,
+              searchIntent: 5,
+              vendorSpecificity: 5,
+              keywordSpecificity: 5,
+              actionWordStrength: 5,
+              commercialSignals: 5,
+              negativeSignals: 8,
+              koenigFit: 5,
+              baseScore: 45,
+              competitionBonus,
+              finalScore: 45 + competitionBonus,
+              tier: 'Review' as const,
+              matchType: 'PHRASE' as const,
+              action: 'REVIEW' as const,
+              priority: '🔵 REVIEW' as const
+            } as AnalyzedKeyword
+          })
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error)
           console.error(`[ANALYZE] ${batchLabel} Error:`, errorMessage)
