@@ -54,7 +54,8 @@ function updateStep(
 }
 
 // Pre-filter keywords before AI analysis (rule-based, instant filtering)
-// This reduces the number of keywords sent to AI, significantly speeding up analysis
+// Only filters out obvious non-converting keywords (competitors, job seekers, etc.)
+// Low-volume keywords are kept for country-specific targeting (valuable long-tail)
 const EXCLUSION_TERMS = [
   'free', 'salary', 'jobs', 'job', 'careers', 'career',
   'dumps', 'torrent', 'pirate', 'crack', 'download',
@@ -67,21 +68,23 @@ const EXCLUSION_TERMS = [
   'glassdoor', 'indeed', 'linkedin'
 ]
 
-const MIN_VOLUME_FOR_AI = 10 // Skip very low volume keywords from AI analysis
+// Only exclude very low volume for "global" targeting where long-tail isn't as valuable
+const MIN_VOLUME_FOR_GLOBAL = 10
 
 interface PreFilterResult {
   forAI: KeywordIdea[]
   excluded: AnalyzedKeyword[]
 }
 
-function preFilterKeywords(keywords: KeywordIdea[], courseName: string): PreFilterResult {
+function preFilterKeywords(keywords: KeywordIdea[], courseName: string, geoTarget: string = 'india'): PreFilterResult {
   const forAI: KeywordIdea[] = []
   const excluded: AnalyzedKeyword[] = []
+  const isGlobalTarget = geoTarget.toLowerCase() === 'global'
 
   for (const kw of keywords) {
     const lowerKeyword = kw.keyword.toLowerCase()
 
-    // Check for exclusion terms
+    // Check for exclusion terms (always exclude these - no conversion potential)
     const excludedTerm = EXCLUSION_TERMS.find(term => lowerKeyword.includes(term))
     if (excludedTerm) {
       excluded.push({
@@ -107,8 +110,10 @@ function preFilterKeywords(keywords: KeywordIdea[], courseName: string): PreFilt
       continue
     }
 
-    // Check minimum volume (skip extremely low volume for AI)
-    if (kw.avgMonthlySearches < MIN_VOLUME_FOR_AI) {
+    // Only exclude very low volume keywords for GLOBAL targeting
+    // For country-specific targeting, keep low-volume long-tail keywords
+    // (they can still be relevant and have less competition)
+    if (isGlobalTarget && kw.avgMonthlySearches < MIN_VOLUME_FOR_GLOBAL) {
       excluded.push({
         ...kw,
         courseRelevance: 0,
@@ -127,16 +132,16 @@ function preFilterKeywords(keywords: KeywordIdea[], courseName: string): PreFilt
         tier: 'Exclude',
         matchType: 'N/A',
         action: 'EXCLUDE',
-        exclusionReason: `Very low search volume (${kw.avgMonthlySearches})`
+        exclusionReason: `Very low search volume for global targeting (${kw.avgMonthlySearches})`
       })
       continue
     }
 
-    // Keyword passes pre-filter, send to AI
+    // Keyword passes pre-filter, send to AI for analysis
     forAI.push(kw)
   }
 
-  console.log(`[PRE-FILTER] ${keywords.length} total -> ${forAI.length} for AI, ${excluded.length} excluded by rules`)
+  console.log(`[PRE-FILTER] ${keywords.length} total -> ${forAI.length} for AI, ${excluded.length} excluded by rules (geo: ${geoTarget})`)
   return { forAI, excluded }
 }
 
@@ -761,7 +766,8 @@ export default function Home() {
       const totalKeywords = keywordsResult.data.length
 
       // Pre-filter keywords using rule-based exclusions (instant, reduces AI load)
-      const { forAI, excluded: preExcluded } = preFilterKeywords(keywordsResult.data, item.courseInput.courseName)
+      // Pass targetCountry so low-volume keywords are kept for country-specific targeting
+      const { forAI, excluded: preExcluded } = preFilterKeywords(keywordsResult.data, item.courseInput.courseName, targetCountry)
 
       updateProgress('analyze', 'in_progress', `Pre-filtered: ${forAI.length}/${totalKeywords} for AI analysis...`, 5)
 
