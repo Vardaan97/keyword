@@ -1271,16 +1271,24 @@ export default function Home() {
                       <td className="py-3 px-4 text-center">
                         {kw.inAccount ? (
                           <span
-                            className="inline-flex items-center justify-center min-w-[24px] px-2 py-1 rounded-full bg-[var(--accent-lime)]/20 text-[var(--accent-lime)] text-xs font-bold cursor-help"
-                            title={kw.inAccountNames?.join(', ') || 'In account'}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[var(--accent-lime)]/20 text-[var(--accent-lime)] text-xs font-bold cursor-help"
+                            title={`In: ${kw.inAccountNames?.join(', ') || 'Account'}`}
                           >
-                            {kw.inAccountNames && kw.inAccountNames.length > 1
-                              ? `${kw.inAccountNames.length}`
-                              : kw.inAccountNames?.[0]?.split(' ')[0] || 'Y'}
+                            <span>Y</span>
+                            {kw.inAccountNames && kw.inAccountNames.length > 0 && (
+                              <span className="text-[10px] opacity-75">
+                                ({kw.inAccountNames.map(name =>
+                                  name.includes('Flexi') ? 'F' :
+                                  name.includes('Bouquet INR - 2') ? 'B2' :
+                                  name.includes('Bouquet INR') ? 'B1' :
+                                  name.split(' ')[0]
+                                ).join(',')})
+                              </span>
+                            )}
                           </span>
                         ) : (
-                          <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[var(--bg-tertiary)] text-[var(--text-muted)] text-xs">
-                            -
+                          <span className="inline-flex items-center justify-center px-2 py-1 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)] text-xs font-medium">
+                            N
                           </span>
                         )}
                       </td>
@@ -1311,8 +1319,8 @@ export default function Home() {
                     kw.competitionIndex,
                     kw.lowTopOfPageBidMicros ? (kw.lowTopOfPageBidMicros / 1000000).toFixed(2) : '',
                     kw.highTopOfPageBidMicros ? (kw.highTopOfPageBidMicros / 1000000).toFixed(2) : '',
-                    kw.inAccount ? 'Yes' : 'No',
-                    kw.inAccountNames?.join('; ') || ''
+                    kw.inAccount ? 'Y' : 'N',
+                    kw.inAccountNames?.join('; ') || '-'
                   ])
                   const csvContent = [
                     headers.join(','),
@@ -2000,12 +2008,25 @@ export default function Home() {
                                   </td>
                                   <td className="py-3 px-2 text-center">
                                     {kw.inAccount ? (
-                                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[var(--accent-lime)]/20 text-[var(--accent-lime)] text-xs font-bold" title="Already in account">
-                                        Y
+                                      <span
+                                        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[var(--accent-lime)]/20 text-[var(--accent-lime)] text-xs font-bold cursor-help"
+                                        title={`In: ${kw.inAccountNames?.join(', ') || 'Account'}`}
+                                      >
+                                        <span>Y</span>
+                                        {kw.inAccountNames && kw.inAccountNames.length > 0 && (
+                                          <span className="text-[10px] opacity-75">
+                                            ({kw.inAccountNames.map(name =>
+                                              name.includes('Flexi') ? 'F' :
+                                              name.includes('Bouquet INR - 2') ? 'B2' :
+                                              name.includes('Bouquet INR') ? 'B1' :
+                                              name.split(' ')[0]
+                                            ).join(',')})
+                                          </span>
+                                        )}
                                       </span>
                                     ) : (
-                                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[var(--bg-tertiary)] text-[var(--text-muted)] text-xs" title="Not in account">
-                                        -
+                                      <span className="inline-flex items-center justify-center px-2 py-1 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)] text-xs font-medium" title="Not in account">
+                                        N
                                       </span>
                                     )}
                                   </td>

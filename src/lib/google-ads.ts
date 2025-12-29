@@ -248,7 +248,7 @@ export async function getKeywordsFromSupabase(customerId?: string): Promise<Map<
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const adGroup = kw.gads_ad_groups as any
         const accountName = adGroup?.gads_campaigns?.gads_accounts?.name || 'Unknown'
-        const keywordText = kw.keyword_text?.toLowerCase()
+        const keywordText = kw.keyword_text?.toLowerCase().trim()
         if (keywordText) {
           keywordMap.set(keywordText, {
             accountName,
@@ -280,9 +280,10 @@ export async function checkKeywordsInAccounts(keywords: string[]): Promise<Map<s
 
   try {
     // Normalize keywords to lowercase for comparison
-    const normalizedKeywords = keywords.map(k => k.toLowerCase())
+    const normalizedKeywords = keywords.map(k => k.toLowerCase().trim())
 
-    // Query all matching keywords
+    // Query all keywords and filter in-memory for case-insensitive matching
+    // Supabase .in() is case-sensitive, so we fetch more and filter
     const { data, error } = await supabase
       .from('gads_keywords')
       .select(`
@@ -295,24 +296,28 @@ export async function checkKeywordsInAccounts(keywords: string[]): Promise<Map<s
           )
         )
       `)
-      .in('keyword_text', normalizedKeywords)
       .neq('status', 'Removed')
+      .limit(50000) // Get all keywords for matching
 
     if (error) {
       console.error('[GOOGLE-ADS-SUPABASE] Error checking keywords:', error.message)
       return new Map()
     }
 
+    // Create a Set from normalized keywords for O(1) lookup
+    const keywordSet = new Set(normalizedKeywords)
     const resultMap = new Map<string, string[]>()
 
     if (data) {
       for (const kw of data) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const adGroup = kw.gads_ad_groups as any
-        const accountName = adGroup?.gads_campaigns?.gads_accounts?.name || 'Unknown'
-        const keywordText = kw.keyword_text?.toLowerCase()
+        const keywordText = kw.keyword_text?.toLowerCase().trim()
 
-        if (keywordText) {
+        // Only process if this keyword is in our search set
+        if (keywordText && keywordSet.has(keywordText)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const adGroup = kw.gads_ad_groups as any
+          const accountName = adGroup?.gads_campaigns?.gads_accounts?.name || 'Unknown'
+
           if (!resultMap.has(keywordText)) {
             resultMap.set(keywordText, [])
           }
@@ -324,7 +329,7 @@ export async function checkKeywordsInAccounts(keywords: string[]): Promise<Map<s
       }
     }
 
-    console.log(`[GOOGLE-ADS-SUPABASE] Found ${resultMap.size} keywords in accounts`)
+    console.log(`[GOOGLE-ADS-SUPABASE] Found ${resultMap.size}/${keywords.length} keywords in accounts`)
     return resultMap
   } catch (error) {
     console.error('[GOOGLE-ADS-SUPABASE] Error:', error)
