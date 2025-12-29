@@ -210,15 +210,34 @@ export async function getKeywordsFromSupabase(customerId?: string): Promise<Map<
   console.log('[GOOGLE-ADS-SUPABASE] Fetching keywords from Supabase...')
 
   try {
-    // Query keywords with their account info
-    let query = supabase
+    // First, check if we have any data at all
+    const { count: totalCount } = await supabase
+      .from('gads_keywords')
+      .select('*', { count: 'exact', head: true })
+
+    console.log(`[GOOGLE-ADS-SUPABASE] Total keywords in database: ${totalCount || 0}`)
+
+    if (!totalCount || totalCount === 0) {
+      console.log('[GOOGLE-ADS-SUPABASE] No keywords found in database')
+      return new Map()
+    }
+
+    // Query keywords with their account info using a simpler approach
+    // First get keywords, then join manually if needed
+    const { data, error } = await supabase
       .from('gads_keywords')
       .select(`
         keyword_text,
         match_type,
-        gads_ad_groups!inner (
-          gads_campaigns!inner (
-            gads_accounts!inner (
+        status,
+        ad_group_id,
+        gads_ad_groups (
+          name,
+          campaign_id,
+          gads_campaigns (
+            name,
+            account_id,
+            gads_accounts (
               customer_id,
               name
             )
@@ -226,29 +245,36 @@ export async function getKeywordsFromSupabase(customerId?: string): Promise<Map<
         )
       `)
       .neq('status', 'Removed')
-      .limit(50000) // Get all keywords
-
-    if (customerId) {
-      const cleanId = customerId.replace(/-/g, '')
-      // Filter by customer_id if specified
-      query = query.eq('gads_ad_groups.gads_campaigns.gads_accounts.customer_id', cleanId)
-    }
-
-    const { data, error } = await query
+      .limit(50000)
 
     if (error) {
       console.error('[GOOGLE-ADS-SUPABASE] Error fetching keywords:', error.message)
+      console.error('[GOOGLE-ADS-SUPABASE] Error details:', JSON.stringify(error, null, 2))
       return new Map()
     }
 
+    console.log(`[GOOGLE-ADS-SUPABASE] Query returned ${data?.length || 0} rows`)
+
     const keywordMap = new Map<string, { accountName: string; matchType: string | null }>()
 
-    if (data) {
+    if (data && data.length > 0) {
+      // Debug: Log first raw result to understand structure
+      console.log('[GOOGLE-ADS-SUPABASE] First result structure:', JSON.stringify(data[0], null, 2))
+
       for (const kw of data) {
+        // Navigate the nested structure carefully
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const adGroup = kw.gads_ad_groups as any
-        const accountName = adGroup?.gads_campaigns?.gads_accounts?.name || 'Unknown'
+        const adGroups = kw.gads_ad_groups as any
+        // Handle both single object and array cases
+        const adGroup = Array.isArray(adGroups) ? adGroups[0] : adGroups
+        const campaigns = adGroup?.gads_campaigns
+        const campaign = Array.isArray(campaigns) ? campaigns[0] : campaigns
+        const accounts = campaign?.gads_accounts
+        const account = Array.isArray(accounts) ? accounts[0] : accounts
+
+        const accountName = account?.name || 'Unknown'
         const keywordText = kw.keyword_text?.toLowerCase().trim()
+
         if (keywordText) {
           keywordMap.set(keywordText, {
             accountName,
@@ -258,7 +284,20 @@ export async function getKeywordsFromSupabase(customerId?: string): Promise<Map<
       }
     }
 
-    console.log(`[GOOGLE-ADS-SUPABASE] Found ${keywordMap.size} keywords in Supabase`)
+    console.log(`[GOOGLE-ADS-SUPABASE] Parsed ${keywordMap.size} unique keywords`)
+
+    // Debug: Show sample keywords to verify format
+    if (keywordMap.size > 0) {
+      const sampleKeywords = Array.from(keywordMap.entries()).slice(0, 5)
+      console.log('[GOOGLE-ADS-SUPABASE] Sample keywords from Supabase:')
+      sampleKeywords.forEach(([kw, info]) => {
+        console.log(`  - "${kw}" (account: ${info.accountName}, match: ${info.matchType})`)
+      })
+    } else if (data && data.length > 0) {
+      console.log('[GOOGLE-ADS-SUPABASE] WARNING: Data returned but no keywords parsed!')
+      console.log('[GOOGLE-ADS-SUPABASE] Check the data structure above')
+    }
+
     return keywordMap
   } catch (error) {
     console.error('[GOOGLE-ADS-SUPABASE] Error:', error)
@@ -282,22 +321,21 @@ export async function checkKeywordsInAccounts(keywords: string[]): Promise<Map<s
     // Normalize keywords to lowercase for comparison
     const normalizedKeywords = keywords.map(k => k.toLowerCase().trim())
 
-    // Query all keywords and filter in-memory for case-insensitive matching
-    // Supabase .in() is case-sensitive, so we fetch more and filter
+    // Query all keywords with nested joins
     const { data, error } = await supabase
       .from('gads_keywords')
       .select(`
         keyword_text,
-        gads_ad_groups!inner (
-          gads_campaigns!inner (
-            gads_accounts!inner (
+        gads_ad_groups (
+          gads_campaigns (
+            gads_accounts (
               name
             )
           )
         )
       `)
       .neq('status', 'Removed')
-      .limit(50000) // Get all keywords for matching
+      .limit(50000)
 
     if (error) {
       console.error('[GOOGLE-ADS-SUPABASE] Error checking keywords:', error.message)
@@ -314,16 +352,23 @@ export async function checkKeywordsInAccounts(keywords: string[]): Promise<Map<s
 
         // Only process if this keyword is in our search set
         if (keywordText && keywordSet.has(keywordText)) {
+          // Navigate the nested structure carefully
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const adGroup = kw.gads_ad_groups as any
-          const accountName = adGroup?.gads_campaigns?.gads_accounts?.name || 'Unknown'
+          const adGroups = kw.gads_ad_groups as any
+          const adGroup = Array.isArray(adGroups) ? adGroups[0] : adGroups
+          const campaigns = adGroup?.gads_campaigns
+          const campaign = Array.isArray(campaigns) ? campaigns[0] : campaigns
+          const accounts = campaign?.gads_accounts
+          const account = Array.isArray(accounts) ? accounts[0] : accounts
+
+          const accountName = account?.name || 'Unknown'
 
           if (!resultMap.has(keywordText)) {
             resultMap.set(keywordText, [])
           }
-          const accounts = resultMap.get(keywordText)!
-          if (!accounts.includes(accountName)) {
-            accounts.push(accountName)
+          const accountList = resultMap.get(keywordText)!
+          if (!accountList.includes(accountName)) {
+            accountList.push(accountName)
           }
         }
       }
@@ -532,7 +577,8 @@ export async function getKeywordIdeas(
 
     // Check if keyword is already in the Google Ads account
     // Cross-reference against actual keywords fetched from the account
-    const keywordText = (result.text as string).toLowerCase()
+    // IMPORTANT: Must match the same normalization used when fetching from Supabase
+    const keywordText = (result.text as string).toLowerCase().trim()
     const inAccount = accountKeywords.has(keywordText)
     // Get list of account names that contain this keyword
     const accountsWithKeyword = keywordToAccounts.get(keywordText)
@@ -557,9 +603,30 @@ export async function getKeywordIdeas(
   const filteredIdeas = keywordIdeas.filter(kw => kw.avgMonthlySearches > 0)
 
   console.log('[GOOGLE-ADS] Parsed keyword ideas:', keywordIdeas.length, '(with volume:', filteredIdeas.length, ')')
-  console.log('[GOOGLE-ADS] Keywords already in account:', inAccountCount)
+  console.log('[GOOGLE-ADS] Keywords already in account:', inAccountCount, '/', filteredIdeas.length)
+
+  // Debug: Show which keywords are in account
+  if (inAccountCount > 0) {
+    const inAccountKeywords = filteredIdeas.filter(kw => kw.inAccount).slice(0, 5)
+    console.log('[GOOGLE-ADS] Sample "in account" keywords:')
+    inAccountKeywords.forEach(kw => {
+      console.log(`  - "${kw.keyword}" (accounts: ${kw.inAccountNames?.join(', ') || 'N/A'})`)
+    })
+  } else if (accountKeywords.size > 0) {
+    // Debug: Check why no matches - show sample keywords from both sides
+    console.log('[GOOGLE-ADS] WARNING: No keyword matches found!')
+    console.log('[GOOGLE-ADS] Sample from Google API (first 5):')
+    filteredIdeas.slice(0, 5).forEach(kw => {
+      console.log(`  - "${kw.keyword.toLowerCase().trim()}"`)
+    })
+    console.log('[GOOGLE-ADS] Sample from Account (first 5):')
+    Array.from(accountKeywords).slice(0, 5).forEach(kw => {
+      console.log(`  - "${kw}"`)
+    })
+  }
+
   if (filteredIdeas.length > 0) {
-    console.log('[GOOGLE-ADS] Top keyword:', filteredIdeas[0])
+    console.log('[GOOGLE-ADS] Top keyword:', filteredIdeas[0].keyword, '- volume:', filteredIdeas[0].avgMonthlySearches)
     console.log('[GOOGLE-ADS] Volume range:', filteredIdeas[filteredIdeas.length - 1].avgMonthlySearches, '-', filteredIdeas[0].avgMonthlySearches)
   }
 
