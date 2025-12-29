@@ -405,75 +405,77 @@ export async function getKeywordIdeas(
   const currentAccount = GOOGLE_ADS_ACCOUNTS.find(acc => acc.customerId === request.customerId.replace(/-/g, ''))
   const bidCurrency = currentAccount?.currency || 'INR'
 
-  // STEP 1: First check Supabase for imported keywords (faster, no API quota used)
-  // This is the PRIMARY source for "in account" checking - we have Flexi data here
-  console.log('[GOOGLE-ADS] STEP 1: Checking Supabase for imported keywords (PRIMARY)...')
-  let hasSupabaseData = false
-  try {
-    const supabaseKeywords = await getKeywordsFromSupabase()
-    if (supabaseKeywords.size > 0) {
-      hasSupabaseData = true
-      console.log(`[GOOGLE-ADS] Found ${supabaseKeywords.size} keywords in Supabase (Flexi account)`)
-      for (const [kw, info] of supabaseKeywords) {
-        accountKeywords.add(kw)
-        if (!keywordToAccounts.has(kw)) {
-          keywordToAccounts.set(kw, new Set())
-        }
-        keywordToAccounts.get(kw)!.add(info.accountName)
-      }
-    }
-  } catch (supabaseError) {
-    console.log('[GOOGLE-ADS] Supabase check failed:', supabaseError)
+  // Determine which accounts to check based on user selection
+  const accountsToCheck: string[] = []
+  if (request.checkAllAccounts && request.allAccountIds && request.allAccountIds.length > 0) {
+    accountsToCheck.push(...request.allAccountIds)
+    console.log(`[GOOGLE-ADS] Mode: ALL ACCOUNTS (${accountsToCheck.length} accounts)`)
+  } else {
+    accountsToCheck.push(request.customerId)
+    console.log(`[GOOGLE-ADS] Mode: SINGLE ACCOUNT (${getAccountName(request.customerId)})`)
   }
 
-  // STEP 2: Only fetch from Google Ads API if we DON'T have Supabase data
-  // This saves API quota - Supabase has Flexi data which is our primary focus
-  if (!hasSupabaseData) {
-    console.log('[GOOGLE-ADS] STEP 2: No Supabase data, fetching from Google Ads API...')
+  // STEP 1: ALWAYS fetch from Google Ads API for accurate "in account" checking
+  // API is the source of truth - Supabase is only a fallback
+  console.log('[GOOGLE-ADS] STEP 1: Fetching keywords from Google Ads API (PRIMARY)...')
+  let apiSuccessful = false
 
-    if (request.checkAllAccounts && request.allAccountIds && request.allAccountIds.length > 0) {
-      // Fetch keywords from accounts SEQUENTIALLY (not parallel) to respect rate limits
-      console.log(`[GOOGLE-ADS] Fetching keywords from ${request.allAccountIds.length} accounts sequentially...`)
+  for (const accId of accountsToCheck) {
+    const accountName = getAccountName(accId)
+    console.log(`[GOOGLE-ADS] Fetching from ${accountName} (${accId})...`)
 
-      for (const accId of request.allAccountIds) {
-        try {
-          console.log(`[GOOGLE-ADS] Fetching from account ${accId}...`)
-          const keywords = await getAccountKeywords(config, accId)
-          const accountName = getAccountName(accId)
+    try {
+      const keywords = await getAccountKeywords(config, accId)
 
-          for (const kw of keywords) {
-            accountKeywords.add(kw)
-            if (!keywordToAccounts.has(kw)) {
-              keywordToAccounts.set(kw, new Set())
-            }
-            keywordToAccounts.get(kw)!.add(accountName)
-          }
-          console.log(`[GOOGLE-ADS] Account ${accountName}: ${keywords.size} keywords, total: ${accountKeywords.size}`)
-        } catch (error) {
-          console.error(`[GOOGLE-ADS] Failed to fetch from account ${accId}:`, error)
-          // Continue with other accounts
-        }
-      }
-      console.log('[GOOGLE-ADS] Combined keywords from all accounts:', accountKeywords.size, 'unique keywords')
-    } else {
-      // Single account mode
-      try {
-        const apiKeywords = await getAccountKeywords(config, request.customerId)
-        const accountName = getAccountName(request.customerId)
-        for (const kw of apiKeywords) {
+      if (keywords.size > 0) {
+        apiSuccessful = true
+        for (const kw of keywords) {
           accountKeywords.add(kw)
           if (!keywordToAccounts.has(kw)) {
             keywordToAccounts.set(kw, new Set())
           }
           keywordToAccounts.get(kw)!.add(accountName)
         }
-        console.log('[GOOGLE-ADS] Account keywords loaded from API:', accountKeywords.size, 'keywords')
-      } catch (apiError) {
-        console.log('[GOOGLE-ADS] API fetch failed:', apiError)
+        console.log(`[GOOGLE-ADS] ✓ ${accountName}: ${keywords.size} keywords (total: ${accountKeywords.size})`)
+      } else {
+        console.log(`[GOOGLE-ADS] ⚠ ${accountName}: 0 keywords returned`)
       }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      console.error(`[GOOGLE-ADS] ✗ ${accountName} failed:`, errorMsg)
+
+      // Check if it's a quota error
+      if (errorMsg.includes('exhausted') || errorMsg.includes('quota') || errorMsg.includes('RESOURCE_EXHAUSTED')) {
+        console.log('[GOOGLE-ADS] Quota exhausted - will try Supabase fallback')
+        break // Stop trying more accounts
+      }
+      // Continue with other accounts for non-quota errors
+    }
+  }
+
+  // STEP 2: FALLBACK to Supabase if API failed or returned no data
+  if (!apiSuccessful || accountKeywords.size === 0) {
+    console.log('[GOOGLE-ADS] STEP 2: API failed/empty - trying Supabase fallback...')
+
+    try {
+      const supabaseKeywords = await getKeywordsFromSupabase()
+      if (supabaseKeywords.size > 0) {
+        console.log(`[GOOGLE-ADS] Supabase fallback: Found ${supabaseKeywords.size} keywords`)
+        for (const [kw, info] of supabaseKeywords) {
+          accountKeywords.add(kw)
+          if (!keywordToAccounts.has(kw)) {
+            keywordToAccounts.set(kw, new Set())
+          }
+          keywordToAccounts.get(kw)!.add(info.accountName)
+        }
+      } else {
+        console.log('[GOOGLE-ADS] Supabase fallback also empty')
+      }
+    } catch (supabaseError) {
+      console.log('[GOOGLE-ADS] Supabase fallback failed:', supabaseError)
     }
   } else {
-    console.log('[GOOGLE-ADS] STEP 2: Skipping API calls - using Supabase data (saves quota)')
+    console.log('[GOOGLE-ADS] STEP 2: Skipping Supabase - API returned data successfully')
   }
 
   console.log('[GOOGLE-ADS] TOTAL unique keywords for "in account" check:', accountKeywords.size)
