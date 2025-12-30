@@ -635,9 +635,18 @@ export async function getKeywordIdeas(
   return filteredIdeas
 }
 
+// Token cache to avoid regenerating on every request
+let cachedAccessToken: { token: string; expiresAt: number } | null = null
+
 async function getAccessToken(config: GoogleAdsConfig): Promise<string> {
+  // Check if we have a valid cached token (with 5 minute buffer)
+  if (cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 5 * 60 * 1000) {
+    console.log('[GOOGLE-ADS] Using cached access token')
+    return cachedAccessToken.token
+  }
+
   const tokenUrl = 'https://oauth2.googleapis.com/token'
-  console.log('[GOOGLE-ADS] Requesting access token...')
+  console.log('[GOOGLE-ADS] Requesting new access token...')
 
   const response = await fetch(tokenUrl, {
     method: 'POST',
@@ -655,11 +664,31 @@ async function getAccessToken(config: GoogleAdsConfig): Promise<string> {
   if (!response.ok) {
     const error = await response.json()
     console.error('[GOOGLE-ADS] Token error:', error)
+
+    // Provide specific guidance for token expiration/revocation
+    if (error.error === 'invalid_grant') {
+      const errorDesc = error.error_description || ''
+      if (errorDesc.includes('expired') || errorDesc.includes('revoked')) {
+        throw new Error(
+          'Token has been expired or revoked. ' +
+          'Please visit /api/auth/google-ads to get a new refresh token, ' +
+          'then update GOOGLE_ADS_REFRESH_TOKEN in your .env.local file and restart the server.'
+        )
+      }
+    }
+
     throw new Error(error.error_description || 'Failed to get access token')
   }
 
   const data = await response.json()
   console.log('[GOOGLE-ADS] Token expires in:', data.expires_in, 'seconds')
+
+  // Cache the token
+  cachedAccessToken = {
+    token: data.access_token,
+    expiresAt: Date.now() + (data.expires_in * 1000)
+  }
+
   return data.access_token
 }
 
