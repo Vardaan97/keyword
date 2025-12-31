@@ -189,6 +189,72 @@ export default function Home() {
   // Raw keywords modal state (for viewing during processing)
   const [showRawKeywordsModal, setShowRawKeywordsModal] = useState(false)
 
+  // Input mode: CSV upload or manual entry
+  const [inputMode, setInputMode] = useState<'csv' | 'manual'>('csv')
+
+  // Manual entry form state
+  const [manualEntries, setManualEntries] = useState<Array<{
+    id: string
+    courseName: string
+    courseUrl: string
+    vendor: string
+    courseCode: string
+    certification: string
+    courseTopics: string
+  }>>([{ id: generateId(), courseName: '', courseUrl: '', vendor: '', courseCode: '', certification: '', courseTopics: '' }])
+
+  // Add new manual entry row
+  const addManualEntry = () => {
+    setManualEntries(prev => [...prev, { id: generateId(), courseName: '', courseUrl: '', vendor: '', courseCode: '', certification: '', courseTopics: '' }])
+  }
+
+  // Remove manual entry row
+  const removeManualEntry = (id: string) => {
+    if (manualEntries.length > 1) {
+      setManualEntries(prev => prev.filter(entry => entry.id !== id))
+    }
+  }
+
+  // Update manual entry field
+  const updateManualEntry = (id: string, field: string, value: string) => {
+    setManualEntries(prev => prev.map(entry =>
+      entry.id === id ? { ...entry, [field]: value } : entry
+    ))
+  }
+
+  // Process manual entries
+  const processManualEntries = () => {
+    const validEntries = manualEntries.filter(entry => entry.courseName.trim() && entry.courseUrl.trim())
+    if (validEntries.length === 0) return
+
+    const steps = createProcessingSteps()
+    const items: BatchCourseItem[] = validEntries.map((entry, index) => ({
+      id: generateId(),
+      rowIndex: index + 1,
+      courseInput: {
+        courseName: entry.courseName.trim(),
+        courseUrl: entry.courseUrl.trim(),
+        certificationCode: entry.courseCode.trim() || undefined,
+        primaryVendor: entry.vendor.trim() || undefined,
+        relatedTerms: entry.courseTopics.trim() ? entry.courseTopics.split(',').map(t => t.trim()).filter(Boolean) : [],
+        targetGeography: 'india'
+      },
+      status: 'pending' as BatchItemStatus,
+      seedKeywords: [],
+      keywordIdeas: [],
+      analyzedKeywords: [],
+      progress: {
+        currentStep: 0,
+        totalSteps: steps.length,
+        steps: steps
+      }
+    }))
+
+    setBatchItems(items)
+    setSelectedItemId(items[0].id)
+    setActiveView('processing')
+  }
+
   // Filter state
   const [filters, setFilters] = useState<KeywordFilters>({
     search: '',
@@ -1346,18 +1412,50 @@ export default function Home() {
         {/* Upload View */}
         {activeView === 'upload' && (
           <div className="flex flex-col items-center justify-center min-h-[70vh]">
-            <div className="w-full max-w-2xl">
+            <div className="w-full max-w-3xl">
               <div className="text-center mb-8">
                 <h2 className="font-display font-bold text-4xl mb-4 bg-gradient-to-r from-cyan-400 via-violet-400 to-rose-400 bg-clip-text text-transparent">
-                  Batch Keyword Research
+                  Google Ads Keyword Planner
                 </h2>
-                <p className="text-[var(--text-secondary)] text-lg">
-                  Upload your course CSV to generate AI-powered keyword insights
+                <p className="text-[var(--text-secondary)] text-lg max-w-xl mx-auto">
+                  Generate high-converting keywords for your courses using AI analysis and real search volume data
                 </p>
               </div>
 
+              {/* Input Mode Tabs */}
+              <div className="flex justify-center mb-6">
+                <div className="inline-flex rounded-xl bg-[var(--bg-tertiary)] p-1 border border-[var(--border-subtle)]">
+                  <button
+                    onClick={() => setInputMode('csv')}
+                    className={`px-6 py-2.5 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                      inputMode === 'csv'
+                        ? 'bg-[var(--accent-electric)] text-white shadow-lg'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                    }`}
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    CSV Upload
+                  </button>
+                  <button
+                    onClick={() => setInputMode('manual')}
+                    className={`px-6 py-2.5 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                      inputMode === 'manual'
+                        ? 'bg-[var(--accent-electric)] text-white shadow-lg'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                    }`}
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                    Manual Entry
+                  </button>
+                </div>
+              </div>
+
               {/* Data Source, Account & Country Settings */}
-              <div className="mb-8 p-6 rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)]">
+              <div className="mb-6 p-6 rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)]">
                 <div className="flex items-center gap-2 mb-4">
                   <svg className="w-5 h-5 text-[var(--accent-electric)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
@@ -1499,43 +1597,176 @@ export default function Home() {
                 </div>
               </div>
 
-              <div
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                onClick={() => fileInputRef.current?.click()}
-                className={`drop-zone rounded-2xl p-12 cursor-pointer transition-all ${isDragging ? 'drag-over glow-electric' : 'hover:border-[var(--border-strong)]'}`}
-              >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".csv"
-                  onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
-                  className="hidden"
-                />
-                <div className="flex flex-col items-center gap-4">
-                  <div className="w-16 h-16 rounded-2xl bg-[var(--bg-tertiary)] flex items-center justify-center">
-                    <svg className="w-8 h-8 text-[var(--accent-electric)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                    </svg>
+              {/* CSV Upload Mode */}
+              {inputMode === 'csv' && (
+                <>
+                  <div
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    onClick={() => fileInputRef.current?.click()}
+                    className={`drop-zone rounded-2xl p-12 cursor-pointer transition-all ${isDragging ? 'drag-over glow-electric' : 'hover:border-[var(--border-strong)]'}`}
+                  >
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".csv"
+                      onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
+                      className="hidden"
+                    />
+                    <div className="flex flex-col items-center gap-4">
+                      <div className="w-16 h-16 rounded-2xl bg-[var(--bg-tertiary)] flex items-center justify-center">
+                        <svg className="w-8 h-8 text-[var(--accent-electric)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                        </svg>
+                      </div>
+                      <div className="text-center">
+                        <p className="text-[var(--text-primary)] font-medium mb-1">
+                          Drop your CSV file here or click to browse
+                        </p>
+                        <p className="text-[var(--text-muted)] text-sm">
+                          Required columns: URL, Course Name, Vendor
+                        </p>
+                      </div>
+                    </div>
                   </div>
-                  <div className="text-center">
-                    <p className="text-[var(--text-primary)] font-medium mb-1">
-                      Drop your CSV file here or click to browse
-                    </p>
-                    <p className="text-[var(--text-muted)] text-sm">
-                      Required columns: URL, Course Name, Vendor
-                    </p>
-                  </div>
-                </div>
-              </div>
 
-              <div className="mt-8 p-4 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)]">
-                <h3 className="font-mono text-xs text-[var(--text-muted)] uppercase tracking-wider mb-3">CSV Format</h3>
-                <code className="text-xs text-[var(--accent-lime)] font-mono">
-                  URL, Course Name, Course Code, Vendor, Certification, Course topics covered
-                </code>
-              </div>
+                  <div className="mt-6 p-4 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)]">
+                    <h3 className="font-mono text-xs text-[var(--text-muted)] uppercase tracking-wider mb-3">CSV Format</h3>
+                    <code className="text-xs text-[var(--accent-lime)] font-mono">
+                      URL, Course Name, Course Code, Vendor, Certification, Course topics covered
+                    </code>
+                  </div>
+                </>
+              )}
+
+              {/* Manual Entry Mode */}
+              {inputMode === 'manual' && (
+                <div className="space-y-4">
+                  <div className="p-4 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)]">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="font-medium text-sm text-[var(--text-primary)]">Add Courses Manually</h3>
+                      <span className="text-xs text-[var(--text-muted)]">{manualEntries.length} course(s)</span>
+                    </div>
+
+                    <div className="space-y-4">
+                      {manualEntries.map((entry, index) => (
+                        <div key={entry.id} className="p-4 rounded-xl bg-[var(--bg-tertiary)] border border-[var(--border-subtle)] relative">
+                          {/* Entry Header */}
+                          <div className="flex items-center justify-between mb-4">
+                            <span className="text-xs font-medium text-[var(--accent-electric)]">Course {index + 1}</span>
+                            {manualEntries.length > 1 && (
+                              <button
+                                onClick={() => removeManualEntry(entry.id)}
+                                className="p-1 rounded hover:bg-[var(--accent-rose)]/10 text-[var(--text-muted)] hover:text-[var(--accent-rose)] transition-colors"
+                              >
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Required Fields */}
+                          <div className="grid grid-cols-2 gap-3 mb-3">
+                            <div>
+                              <label className="block text-xs text-[var(--text-muted)] mb-1.5">
+                                Course Name <span className="text-[var(--accent-rose)]">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                value={entry.courseName}
+                                onChange={(e) => updateManualEntry(entry.id, 'courseName', e.target.value)}
+                                placeholder="e.g., AZ-104: Microsoft Azure Administrator"
+                                className="w-full px-3 py-2 rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-electric)] transition-colors"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-[var(--text-muted)] mb-1.5">
+                                Course URL <span className="text-[var(--accent-rose)]">*</span>
+                              </label>
+                              <input
+                                type="url"
+                                value={entry.courseUrl}
+                                onChange={(e) => updateManualEntry(entry.id, 'courseUrl', e.target.value)}
+                                placeholder="https://example.com/course"
+                                className="w-full px-3 py-2 rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-electric)] transition-colors"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-3 mb-3">
+                            <div>
+                              <label className="block text-xs text-[var(--text-muted)] mb-1.5">Vendor</label>
+                              <input
+                                type="text"
+                                value={entry.vendor}
+                                onChange={(e) => updateManualEntry(entry.id, 'vendor', e.target.value)}
+                                placeholder="e.g., Microsoft"
+                                className="w-full px-3 py-2 rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-electric)] transition-colors"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-[var(--text-muted)] mb-1.5">Course Code</label>
+                              <input
+                                type="text"
+                                value={entry.courseCode}
+                                onChange={(e) => updateManualEntry(entry.id, 'courseCode', e.target.value)}
+                                placeholder="e.g., AZ-104"
+                                className="w-full px-3 py-2 rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-electric)] transition-colors"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-[var(--text-muted)] mb-1.5">Certification</label>
+                              <input
+                                type="text"
+                                value={entry.certification}
+                                onChange={(e) => updateManualEntry(entry.id, 'certification', e.target.value)}
+                                placeholder="e.g., Azure Administrator"
+                                className="w-full px-3 py-2 rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-electric)] transition-colors"
+                              />
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="block text-xs text-[var(--text-muted)] mb-1.5">Course Topics (comma-separated)</label>
+                            <input
+                              type="text"
+                              value={entry.courseTopics}
+                              onChange={(e) => updateManualEntry(entry.id, 'courseTopics', e.target.value)}
+                              placeholder="e.g., Azure, Cloud Computing, Virtual Machines"
+                              className="w-full px-3 py-2 rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-electric)] transition-colors"
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Add More Button */}
+                    <button
+                      onClick={addManualEntry}
+                      className="mt-4 w-full py-2.5 rounded-lg border-2 border-dashed border-[var(--border-subtle)] text-sm text-[var(--text-muted)] hover:text-[var(--accent-electric)] hover:border-[var(--accent-electric)] transition-colors flex items-center justify-center gap-2"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                      </svg>
+                      Add Another Course
+                    </button>
+                  </div>
+
+                  {/* Start Processing Button */}
+                  <button
+                    onClick={processManualEntries}
+                    disabled={!manualEntries.some(e => e.courseName.trim() && e.courseUrl.trim())}
+                    className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[var(--accent-electric)] to-[var(--accent-violet)] text-white font-medium text-sm hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    Start Keyword Research
+                  </button>
+                </div>
+              )}
 
               {/* Load Last Session Button */}
               {savedBatchItems && savedBatchItems.length > 0 && (
