@@ -62,30 +62,37 @@ async function getAccessToken(config: {
 }
 
 /**
- * Fetch keywords from a specific Google Ads account
+ * Check specific keywords against a Google Ads account using GAQL IN clause
+ * This is the CORRECT way to check - it queries the full account database
  */
-async function fetchAccountKeywords(
+async function checkKeywordsInAccount(
   config: ReturnType<typeof getGoogleAdsConfig>,
-  customerId: string
-): Promise<{ keywords: Set<string>; rawKeywords: string[]; error?: string }> {
+  customerId: string,
+  keywordsToCheck: string[]
+): Promise<{ found: Set<string>; matchTypes: Map<string, string[]>; error?: string }> {
   const cleanCustomerId = customerId.replace(/-/g, '')
-  const keywords = new Set<string>()
-  const rawKeywords: string[] = []
+  const found = new Set<string>()
+  const matchTypes = new Map<string, string[]>()
 
   try {
     const accessToken = await getAccessToken(config)
     const loginCustomerId = config.loginCustomerId.replace(/-/g, '')
+
+    // Normalize and prepare keywords for GAQL IN clause
+    const normalizedKeywords = keywordsToCheck.map(k => normalizeKeyword(k))
+    const keywordListStr = normalizedKeywords
+      .map(k => `'${k.replace(/'/g, "\\'")}'`)
+      .join(', ')
 
     const query = `
       SELECT
         ad_group_criterion.keyword.text,
         ad_group_criterion.keyword.match_type
       FROM ad_group_criterion
-      WHERE ad_group_criterion.type = 'KEYWORD'
+      WHERE ad_group_criterion.keyword.text IN (${keywordListStr})
+        AND ad_group_criterion.type = 'KEYWORD'
         AND ad_group_criterion.status != 'REMOVED'
         AND ad_group_criterion.negative = FALSE
-      ORDER BY ad_group_criterion.keyword.text
-      LIMIT 10000
     `
 
     const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${cleanCustomerId}/googleAds:search`
@@ -104,8 +111,8 @@ async function fetchAccountKeywords(
     if (!response.ok) {
       const error = await response.json()
       return {
-        keywords,
-        rawKeywords,
+        found,
+        matchTypes,
         error: error.error?.message || 'API error'
       }
     }
@@ -115,18 +122,27 @@ async function fetchAccountKeywords(
     if (data.results) {
       for (const result of data.results) {
         const keywordText = result.adGroupCriterion?.keyword?.text
+        const matchType = result.adGroupCriterion?.keyword?.matchType || 'UNKNOWN'
         if (keywordText) {
-          rawKeywords.push(keywordText)
-          keywords.add(normalizeKeyword(keywordText))
+          const normalized = normalizeKeyword(keywordText)
+          found.add(normalized)
+
+          // Track match types
+          if (!matchTypes.has(normalized)) {
+            matchTypes.set(normalized, [])
+          }
+          if (!matchTypes.get(normalized)!.includes(matchType)) {
+            matchTypes.get(normalized)!.push(matchType)
+          }
         }
       }
     }
 
-    return { keywords, rawKeywords }
+    return { found, matchTypes }
   } catch (error) {
     return {
-      keywords,
-      rawKeywords,
+      found,
+      matchTypes,
       error: error instanceof Error ? error.message : 'Unknown error'
     }
   }
@@ -180,58 +196,69 @@ export async function POST(request: NextRequest) {
     accountsToCheck.push(...getRealAccountIds())
   }
 
-  // Fetch keywords from each account
+  // Check keywords using efficient GAQL IN clause
   const accountResults: Record<string, {
     accountName: string
-    keywordCount: number
-    sampleKeywords: string[]
+    keywordsFound: number
     error?: string
   }> = {}
 
-  const allAccountKeywords = new Set<string>()
   const keywordToAccounts = new Map<string, string[]>()
+  const keywordMatchTypes = new Map<string, string[]>()
 
   for (const accId of accountsToCheck) {
     const accountName = getAccountName(accId)
-    console.log(`[IN-ACCOUNT-DEBUG] Fetching keywords from ${accountName} (${accId})...`)
+    console.log(`[IN-ACCOUNT-DEBUG] Checking ${keywords.length} keywords in ${accountName} (${accId})...`)
 
-    const result = await fetchAccountKeywords(config, accId)
+    const result = await checkKeywordsInAccount(config, accId, keywords)
 
     accountResults[accId] = {
       accountName,
-      keywordCount: result.keywords.size,
-      sampleKeywords: result.rawKeywords.slice(0, 10),
+      keywordsFound: result.found.size,
       error: result.error
     }
 
-    // Add to combined set
-    for (const kw of result.keywords) {
-      allAccountKeywords.add(kw)
+    // Track which accounts contain each keyword
+    for (const kw of result.found) {
       if (!keywordToAccounts.has(kw)) {
         keywordToAccounts.set(kw, [])
       }
       keywordToAccounts.get(kw)!.push(accountName)
     }
+
+    // Track match types
+    for (const [kw, types] of result.matchTypes) {
+      if (!keywordMatchTypes.has(kw)) {
+        keywordMatchTypes.set(kw, [])
+      }
+      for (const t of types) {
+        if (!keywordMatchTypes.get(kw)!.includes(t)) {
+          keywordMatchTypes.get(kw)!.push(t)
+        }
+      }
+    }
   }
 
-  // Check each input keyword
+  // Build results for each input keyword
   const keywordResults: Record<string, {
     original: string
     normalized: string
     found: boolean
     inAccounts: string[]
+    matchTypes: string[]
   }> = {}
 
   for (const kw of keywords) {
     const normalized = normalizeKeyword(kw)
-    const found = allAccountKeywords.has(normalized)
     const inAccounts = keywordToAccounts.get(normalized) || []
+    const matchTypes = keywordMatchTypes.get(normalized) || []
 
     keywordResults[kw] = {
       original: kw,
       normalized,
-      found,
-      inAccounts
+      found: inAccounts.length > 0,
+      inAccounts,
+      matchTypes
     }
   }
 
@@ -239,33 +266,17 @@ export async function POST(request: NextRequest) {
   const foundCount = Object.values(keywordResults).filter(r => r.found).length
   const totalChecked = keywords.length
 
-  // Find keywords containing search terms for debugging
-  const searchTerm = keywords[0]?.toLowerCase() || ''
-  const matchingAccountKeywords = Array.from(allAccountKeywords)
-    .filter(kw => kw.includes(searchTerm.split(' ')[0])) // Match first word
-    .slice(0, 30)
-
   return NextResponse.json({
     success: true,
     summary: {
       keywordsChecked: totalChecked,
       keywordsFound: foundCount,
-      totalAccountKeywords: allAccountKeywords.size,
-      accountsChecked: accountsToCheck.map(id => getAccountName(id))
+      accountsChecked: accountsToCheck.map(id => getAccountName(id)),
+      method: 'GAQL IN clause (queries full account database)'
     },
     accounts: accountResults,
     keywordResults,
-    sampleAccountKeywords: Array.from(allAccountKeywords).slice(0, 20),
-    // New: keywords containing the search term
-    matchingAccountKeywords: {
-      searchTerm: searchTerm.split(' ')[0],
-      count: matchingAccountKeywords.length,
-      keywords: matchingAccountKeywords
-    },
-    normalizationExample: {
-      input: keywords[0] || 'azure certification',
-      normalized: normalizeKeyword(keywords[0] || 'azure certification')
-    }
+    note: 'This uses the same efficient GAQL IN clause method as the main keyword fetch flow.'
   })
 }
 
