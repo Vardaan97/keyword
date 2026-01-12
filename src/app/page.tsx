@@ -18,6 +18,8 @@ import {
 } from "@/types"
 import { generateId, formatNumber, downloadCSV } from "@/lib/utils"
 import Papa from "papaparse"
+import { ToastProvider } from "@/components/toast-provider"
+import { GoogleAdsStatus } from "@/components/google-ads-status"
 
 // Format elapsed time as mm:ss
 function formatTime(ms: number): string {
@@ -222,6 +224,9 @@ export default function Home() {
     ))
   }
 
+  // Flag to auto-start processing after manual entry
+  const [autoStartProcessing, setAutoStartProcessing] = useState(false)
+
   // Process manual entries
   const processManualEntries = () => {
     const validEntries = manualEntries.filter(entry => entry.courseName.trim() && entry.courseUrl.trim())
@@ -253,6 +258,8 @@ export default function Home() {
     setBatchItems(items)
     setSelectedItemId(items[0].id)
     setActiveView('processing')
+    // Flag to auto-start processing once state is updated
+    setAutoStartProcessing(true)
   }
 
   // Filter state
@@ -263,7 +270,8 @@ export default function Home() {
     maxVolume: Infinity,
     tiers: [],
     actions: [],
-    showSelected: null
+    showSelected: null,
+    showInAccount: null
   })
 
   // Selection state for keywords
@@ -441,29 +449,44 @@ export default function Home() {
       if (signal.aborted) throw new Error('Processing stopped by user')
 
       // ========== STEP 1: Generate Seeds ==========
-      updateProgress('generate_seeds', 'in_progress', 'Calling OpenAI GPT-4o...', 1)
+      updateProgress('generate_seeds', 'in_progress', 'Calling AI for seed keywords...', 1)
+
+      // Use default prompt if store prompt is not available (hydration issue)
+      const promptToUse = seedPrompt?.prompt || DEFAULT_SEED_PROMPT.prompt
+
       console.log(`[STEP 1] Generating seeds for: ${item.courseInput.courseName}`)
+      console.log(`[STEP 1] Course URL: ${item.courseInput.courseUrl}`)
+      console.log(`[STEP 1] Vendor: ${item.courseInput.primaryVendor || 'Not specified'}`)
+
+      const seedRequestBody = {
+        prompt: promptToUse,
+        courseName: item.courseInput.courseName,
+        courseUrl: item.courseInput.courseUrl,
+        vendor: item.courseInput.primaryVendor || 'Not specified'
+      }
 
       const seedResponse = await fetch('/api/keywords/generate-seeds', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: seedPrompt.prompt,
-          courseName: item.courseInput.courseName,
-          courseUrl: item.courseInput.courseUrl,
-          vendor: item.courseInput.primaryVendor
-        }),
+        body: JSON.stringify(seedRequestBody),
         signal
       })
       const seedResult = await seedResponse.json()
 
       if (!seedResult.success) {
-        updateProgress('generate_seeds', 'error', seedResult.error)
-        throw new Error(seedResult.error)
+        const errorMsg = seedResult.error || 'Unknown error generating seeds'
+        updateProgress('generate_seeds', 'error', errorMsg)
+        throw new Error(errorMsg)
       }
 
-      updateProgress('generate_seeds', 'completed', `Generated ${seedResult.data?.length || 0} seed keywords`)
-      console.log(`[STEP 1] Seed result: ${seedResult.data?.length} seeds generated`)
+      if (!seedResult.data || seedResult.data.length === 0) {
+        const errorMsg = 'No seed keywords generated - AI returned empty response'
+        updateProgress('generate_seeds', 'error', errorMsg)
+        throw new Error(errorMsg)
+      }
+
+      updateProgress('generate_seeds', 'completed', `Generated ${seedResult.data.length} seed keywords`)
+      console.log(`[STEP 1] Seed result: ${seedResult.data.length} seeds generated`)
 
       updatedItem = { ...updatedItem, seedKeywords: seedResult.data, status: 'fetching_keywords' }
       setBatchItems(prev => prev.map(i => i.id === item.id ? updatedItem : i))
@@ -475,54 +498,139 @@ export default function Home() {
       updateProgress('check_cache', 'in_progress', 'Looking for cached keyword data...', 2)
       console.log(`[STEP 2a] Checking cache for: ${item.courseInput.courseName}`)
 
-      // ========== STEP 3: Fetch Keywords ==========
+      // ========== STEP 3: Fetch Keywords with Real-time Streaming ==========
       updateProgress('fetch_keywords', 'in_progress', `Calling ${dataSource === 'auto' ? 'Google Ads API' : dataSource}...`, 3)
       console.log(`[STEP 2] Fetching keywords for: ${item.courseInput.courseName} (source: ${dataSource}, country: ${targetCountry})`)
 
-      const keywordsResponse = await fetch('/api/keywords/fetch-ideas', {
+      // Use streaming endpoint for real-time updates
+      const streamResponse = await fetch('/api/keywords/fetch-ideas-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           seedKeywords: seedResult.data.map((s: SeedKeyword) => s.keyword),
           pageUrl: item.courseInput.courseUrl,
-          courseName: item.courseInput.courseName,  // For URL-based cache lookup
+          courseName: item.courseInput.courseName,
           geoTarget: targetCountry,
           source: dataSource,
           accountId: selectedGoogleAdsAccountId
         }),
         signal
       })
-      const keywordsResult = await keywordsResponse.json()
 
-      if (!keywordsResult.success) {
-        updateProgress('fetch_keywords', 'error', keywordsResult.error)
-        throw new Error(keywordsResult.error)
+      if (!streamResponse.ok) {
+        throw new Error(`Failed to fetch keywords: ${streamResponse.statusText}`)
       }
 
-      const dataSourceUsed = keywordsResult.meta?.source || 'unknown'
-      const cacheHit = keywordsResult.meta?.cached || false
+      // Parse SSE stream
+      const reader = streamResponse.body?.getReader()
+      if (!reader) {
+        throw new Error('Failed to get stream reader')
+      }
 
-      // Update cache check step based on result
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let allKeywords: KeywordIdea[] = []
+      let dataSourceUsed = 'google_ads'
+      let cacheHit = false
+      let streamError: string | null = null
+
+      // Process the stream
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || '' // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            const eventType = line.slice(7).trim()
+            continue
+          }
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+
+              // Handle different event types based on data structure
+              if (data.step) {
+                // Progress event
+                const { step, message } = data
+                console.log(`[STREAM] Progress: ${step} - ${message}`)
+
+                if (step === 'cache_hit') {
+                  cacheHit = true
+                  updateProgress('check_cache', 'completed', 'Cache hit! Using cached data')
+                } else if (step === 'checking_cache') {
+                  updateProgress('check_cache', 'in_progress', message)
+                } else if (step === 'fetching' || step === 'fetching_google_ads') {
+                  updateProgress('check_cache', 'completed', 'No cache found')
+                  updateProgress('fetch_keywords', 'in_progress', message)
+                } else if (step === 'caching') {
+                  updateProgress('save_cache', 'in_progress', message)
+                }
+              } else if (data.keywords) {
+                // Keywords batch event - update UI in real-time
+                const batch = data.keywords as KeywordIdea[]
+                allKeywords = [...allKeywords, ...batch]
+
+                // Update progress with current count
+                const inAccountCount = allKeywords.filter(k => k.inAccount).length
+                updateProgress('fetch_keywords', 'in_progress',
+                  `Received ${allKeywords.length} keywords... (${inAccountCount} in account)`)
+
+                // Update the item with keywords so far (real-time display)
+                updatedItem = {
+                  ...updatedItem,
+                  keywordIdeas: allKeywords,
+                  status: 'fetching_keywords' as BatchItemStatus
+                }
+                setBatchItems(prev => prev.map(i => i.id === item.id ? updatedItem : i))
+              } else if (data.success !== undefined) {
+                // Complete event
+                if (data.success) {
+                  dataSourceUsed = data.source || 'google_ads'
+                  cacheHit = data.cached || false
+                  console.log(`[STREAM] Complete: ${data.totalKeywords} keywords from ${dataSourceUsed}`)
+                }
+              } else if (data.message && !data.step) {
+                // Error event
+                streamError = data.message
+                console.error(`[STREAM] Error: ${data.message}`)
+              }
+            } catch (parseError) {
+              console.log('[STREAM] Failed to parse:', line)
+            }
+          }
+        }
+      }
+
+      // Check for errors
+      if (streamError) {
+        updateProgress('fetch_keywords', 'error', streamError)
+        throw new Error(streamError)
+      }
+
+      if (allKeywords.length === 0) {
+        updateProgress('fetch_keywords', 'error', 'No keywords received')
+        throw new Error('No keywords received from API')
+      }
+
+      // Final updates
+      const inAccountCount = allKeywords.filter(k => k.inAccount).length
       if (cacheHit) {
-        updateProgress('check_cache', 'completed', 'Cache hit! Using cached data')
-        updateProgress('fetch_keywords', 'completed', `Retrieved ${keywordsResult.data?.length || 0} keywords from cache`)
+        updateProgress('fetch_keywords', 'completed', `Retrieved ${allKeywords.length} keywords from cache (${inAccountCount} in account)`)
         updateProgress('save_cache', 'completed', 'Skipped (using cached data)')
       } else {
-        updateProgress('check_cache', 'completed', 'No cache found, fetching fresh data')
-        updateProgress('fetch_keywords', 'completed', `Fetched ${keywordsResult.data?.length || 0} keywords from ${dataSourceUsed}`)
-
-        // Step 4: Save to cache (happens in API, but we show it)
-        updateProgress('save_cache', 'in_progress', 'Storing keywords in MongoDB cache...', 4)
-        // Small delay to show the step
-        await new Promise(resolve => setTimeout(resolve, 100))
-        updateProgress('save_cache', 'completed', 'Cached for 48 hours')
+        updateProgress('fetch_keywords', 'completed', `Fetched ${allKeywords.length} keywords from ${dataSourceUsed} (${inAccountCount} in account)`)
+        updateProgress('save_cache', 'completed', 'Cached for future use')
       }
 
-      console.log(`[STEP 2] Keywords result: ${keywordsResult.data?.length} keywords fetched from ${dataSourceUsed}`)
+      console.log(`[STEP 2] Keywords result: ${allKeywords.length} keywords fetched from ${dataSourceUsed}`)
 
       updatedItem = {
         ...updatedItem,
-        keywordIdeas: keywordsResult.data,
+        keywordIdeas: allKeywords,
         status: 'analyzing',
         dataSource: dataSourceUsed as 'google_ads' | 'keywords_everywhere' | 'cache',
         cacheHit
@@ -533,7 +641,7 @@ export default function Home() {
       if (signal.aborted) throw new Error('Processing stopped by user')
 
       // ========== STEP 5: Analyze Keywords ==========
-      const totalKeywords = keywordsResult.data.length
+      const totalKeywords = allKeywords.length
 
       updateProgress('analyze', 'in_progress', `Analyzing ${totalKeywords} keywords with AI...`, 5)
 
@@ -548,7 +656,7 @@ export default function Home() {
           certificationCode: item.courseInput.certificationCode,
           vendor: item.courseInput.primaryVendor,
           relatedTerms: item.courseInput.relatedTerms?.join(', '),
-          keywords: keywordsResult.data
+          keywords: allKeywords
         }),
         signal
       })
@@ -699,6 +807,19 @@ export default function Home() {
     setActiveView('results')
   }
 
+  // Auto-start processing after manual entry (waits for state to update)
+  useEffect(() => {
+    if (autoStartProcessing && batchItems.length > 0 && !isProcessing && activeView === 'processing') {
+      const hasPending = batchItems.some(item => item.status === 'pending')
+      if (hasPending) {
+        console.log('[AUTO-START] Starting processing automatically after manual entry')
+        setAutoStartProcessing(false)
+        startProcessing()
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStartProcessing, batchItems, isProcessing, activeView])
+
   // Process item with delay before API call (for rate limiting)
   const processItemWithDelay = async (
     item: BatchCourseItem,
@@ -743,27 +864,49 @@ export default function Home() {
 
       // ========== STEP 1: Generate Seeds (runs immediately) ==========
       updateProgress('generate_seeds', 'in_progress', 'Calling AI for seeds...', 1)
+
+      // Use default prompt if store prompt is not available (hydration issue)
+      const promptToUse = seedPrompt?.prompt || DEFAULT_SEED_PROMPT.prompt
+
       console.log(`[STEP 1] Generating seeds for: ${item.courseInput.courseName}`)
+      console.log(`[STEP 1] Course URL: ${item.courseInput.courseUrl}`)
+      console.log(`[STEP 1] Vendor: ${item.courseInput.primaryVendor || 'Not specified'}`)
+      console.log(`[STEP 1] Prompt available: ${!!promptToUse} (length: ${promptToUse?.length || 0})`)
+
+      const seedRequestBody = {
+        prompt: promptToUse,
+        courseName: item.courseInput.courseName,
+        courseUrl: item.courseInput.courseUrl,
+        vendor: item.courseInput.primaryVendor || 'Not specified'
+      }
+
+      console.log(`[STEP 1] Request body:`, JSON.stringify(seedRequestBody, null, 2).substring(0, 500))
 
       const seedResponse = await fetch('/api/keywords/generate-seeds', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: seedPrompt.prompt,
-          courseName: item.courseInput.courseName,
-          courseUrl: item.courseInput.courseUrl,
-          vendor: item.courseInput.primaryVendor
-        }),
+        body: JSON.stringify(seedRequestBody),
         signal
       })
+
+      console.log(`[STEP 1] Response status: ${seedResponse.status}`)
+
       const seedResult = await seedResponse.json()
+      console.log(`[STEP 1] Response:`, seedResult.success ? `Success - ${seedResult.data?.length || 0} seeds` : `Error - ${seedResult.error}`)
 
       if (!seedResult.success) {
-        updateProgress('generate_seeds', 'error', seedResult.error)
-        throw new Error(seedResult.error)
+        const errorMsg = seedResult.error || 'Unknown error generating seeds'
+        updateProgress('generate_seeds', 'error', errorMsg)
+        throw new Error(errorMsg)
       }
 
-      updateProgress('generate_seeds', 'completed', `Generated ${seedResult.data?.length || 0} seed keywords`)
+      if (!seedResult.data || seedResult.data.length === 0) {
+        const errorMsg = 'No seed keywords generated - AI returned empty response'
+        updateProgress('generate_seeds', 'error', errorMsg)
+        throw new Error(errorMsg)
+      }
+
+      updateProgress('generate_seeds', 'completed', `Generated ${seedResult.data.length} seed keywords`)
       updatedItem = { ...updatedItem, seedKeywords: seedResult.data, status: 'fetching_keywords' }
       setBatchItems(prev => prev.map(i => i.id === item.id ? updatedItem : i))
 
@@ -974,6 +1117,10 @@ export default function Home() {
       if (filters.showSelected === true && !selectedKeywords.has(kw.keyword)) return false
       if (filters.showSelected === false && selectedKeywords.has(kw.keyword)) return false
 
+      // In Account filter
+      if (filters.showInAccount === true && !kw.inAccount) return false
+      if (filters.showInAccount === false && kw.inAccount) return false
+
       return true
     })
   }
@@ -1087,6 +1234,7 @@ export default function Home() {
   const filteredKeywords = filterKeywords(currentKeywords)
 
   return (
+    <ToastProvider>
     <div className="min-h-screen grid-pattern">
       <div className="noise-overlay" />
 
@@ -1115,6 +1263,9 @@ export default function Home() {
           )}
 
           <div className="flex items-center gap-3">
+            {/* Google Ads Status */}
+            <GoogleAdsStatus compact />
+
             {/* Theme Switcher */}
             <div className="relative group">
               <button
@@ -2138,6 +2289,41 @@ export default function Home() {
                           ))}
                         </div>
 
+                        {/* In Account filter */}
+                        <div className="flex items-center gap-1 border-l border-[var(--border-subtle)] pl-3">
+                          <span className="text-xs text-[var(--text-muted)] mr-1">In Acct:</span>
+                          <button
+                            onClick={() => setFilters({ ...filters, showInAccount: null })}
+                            className={`px-2 py-1 text-xs rounded ${
+                              filters.showInAccount === null
+                                ? 'bg-[var(--accent-electric)]/20 text-[var(--accent-electric)]'
+                                : 'bg-[var(--bg-secondary)] text-[var(--text-muted)]'
+                            }`}
+                          >
+                            All
+                          </button>
+                          <button
+                            onClick={() => setFilters({ ...filters, showInAccount: true })}
+                            className={`px-2 py-1 text-xs rounded ${
+                              filters.showInAccount === true
+                                ? 'bg-[var(--accent-lime)]/20 text-[var(--accent-lime)]'
+                                : 'bg-[var(--bg-secondary)] text-[var(--text-muted)]'
+                            }`}
+                          >
+                            Yes
+                          </button>
+                          <button
+                            onClick={() => setFilters({ ...filters, showInAccount: false })}
+                            className={`px-2 py-1 text-xs rounded ${
+                              filters.showInAccount === false
+                                ? 'bg-[var(--accent-amber)]/20 text-[var(--accent-amber)]'
+                                : 'bg-[var(--bg-secondary)] text-[var(--text-muted)]'
+                            }`}
+                          >
+                            No
+                          </button>
+                        </div>
+
                         {/* Action filters for analyzed view */}
                         {detailViewMode === 'analyzed' && (
                           <div className="flex items-center gap-1">
@@ -2601,5 +2787,6 @@ export default function Home() {
         )}
       </main>
     </div>
+    </ToastProvider>
   )
 }

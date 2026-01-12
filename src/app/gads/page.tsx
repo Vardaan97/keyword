@@ -8,6 +8,7 @@ import {
   CampaignSummary,
   LowQualityKeyword
 } from "@/types/google-ads-kb"
+import { GoogleAdsStatus } from "@/components/google-ads-status"
 
 type ViewTab = 'overview' | 'campaigns' | 'ad-groups' | 'keywords' | 'labels' | 'insights' | 'search'
 type StatusFilter = 'all' | 'enabled' | 'paused' | 'ended'
@@ -301,8 +302,11 @@ export default function GadsPage() {
               )}
             </div>
 
-            {/* Import Button */}
+            {/* Actions */}
             <div className="flex items-center gap-3">
+              {/* Google Ads Status */}
+              <GoogleAdsStatus compact />
+
               <input
                 ref={fileInputRef}
                 type="file"

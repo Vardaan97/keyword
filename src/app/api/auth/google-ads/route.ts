@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import crypto from 'crypto'
 
 /**
  * Google Ads OAuth Authorization URL Generator
@@ -7,14 +8,17 @@ import { NextRequest, NextResponse } from 'next/server'
  * Used when the refresh token expires or is revoked.
  *
  * Flow:
- * 1. GET /api/auth/google-ads - Returns authorization URL
+ * 1. GET /api/auth/google-ads - Returns authorization URL with CSRF state
  * 2. User clicks the URL, logs in, grants permission
  * 3. Google redirects to /api/auth/google-ads/callback with authorization code
- * 4. Callback exchanges code for tokens and displays the new refresh token
+ * 4. Callback verifies state and exchanges code for tokens
  */
 
+// OAuth scopes - include email for user identification
 const GOOGLE_OAUTH_SCOPES = [
-  'https://www.googleapis.com/auth/adwords'  // Google Ads API access
+  'https://www.googleapis.com/auth/adwords',           // Google Ads API access
+  'https://www.googleapis.com/auth/userinfo.email',    // User email for identification
+  'https://www.googleapis.com/auth/userinfo.profile'   // User profile info
 ]
 
 export async function GET(request: NextRequest) {
@@ -28,10 +32,14 @@ export async function GET(request: NextRequest) {
     }, { status: 500 })
   }
 
-  // Build callback URL based on current request
+  // Build callback URL - prefer explicit env var to avoid redirect_uri mismatch
   const protocol = request.headers.get('x-forwarded-proto') || 'http'
   const host = request.headers.get('host') || 'localhost:3005'
-  const callbackUrl = `${protocol}://${host}/api/auth/google-ads/callback`
+  const dynamicCallbackUrl = `${protocol}://${host}/api/auth/google-ads/callback`
+  const callbackUrl = process.env.GOOGLE_ADS_OAUTH_CALLBACK_URL || dynamicCallbackUrl
+
+  // Generate CSRF state parameter
+  const state = crypto.randomBytes(32).toString('hex')
 
   // Generate OAuth authorization URL
   const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
@@ -40,21 +48,33 @@ export async function GET(request: NextRequest) {
   authUrl.searchParams.set('response_type', 'code')
   authUrl.searchParams.set('scope', GOOGLE_OAUTH_SCOPES.join(' '))
   authUrl.searchParams.set('access_type', 'offline')  // Required for refresh token
-  authUrl.searchParams.set('prompt', 'consent')  // Force consent to get new refresh token
+  authUrl.searchParams.set('prompt', 'consent')       // Force consent to get new refresh token
+  authUrl.searchParams.set('state', state)            // CSRF protection
 
-  // Return instructions and the auth URL
-  return NextResponse.json({
+  // Create response with state cookie
+  const response = NextResponse.json({
     success: true,
     message: 'Click the authorization URL to get a new refresh token',
     instructions: [
       '1. Click the authorization URL below',
       '2. Log in with the Google account that has access to your Google Ads accounts',
-      '3. Grant access to Google Ads',
-      '4. You will be redirected back with your new refresh token',
-      '5. Copy the refresh token and update GOOGLE_ADS_REFRESH_TOKEN in your .env.local'
+      '3. Grant access to Google Ads and profile information',
+      '4. You will be redirected back automatically',
+      '5. Your tokens will be saved automatically - no manual copying needed!'
     ],
     authorizationUrl: authUrl.toString(),
     callbackUrl: callbackUrl,
     note: 'Make sure this callback URL is added to your OAuth Authorized redirect URIs in Google Cloud Console'
   })
+
+  // Set state cookie for CSRF verification (expires in 10 minutes)
+  response.cookies.set('oauth_state', state, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 600, // 10 minutes
+    path: '/'
+  })
+
+  return response
 }

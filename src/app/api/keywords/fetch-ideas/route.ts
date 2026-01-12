@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId, GOOGLE_ADS_ACCOUNTS, getAccountName, getRealAccountIds } from '@/lib/google-ads'
 import { getKeywordData, getRelatedKeywords, getKeywordsEverywhereConfig, CountryCode } from '@/lib/keywords-everywhere'
 import { getCachedKeywords, setCachedKeywords, getDatabaseStatus, UnifiedKeywordData, saveKeywordVolumes } from '@/lib/database'
+import { getRefreshToken } from '@/lib/token-storage'
 import { KeywordIdea, ApiResponse } from '@/types'
 
 interface FetchIdeasRequest {
@@ -407,7 +408,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
   // NOTE: This only runs AFTER all cache checks have failed
   console.log('[FETCH-IDEAS] STEP 2: Cache MISS - fetching from Google Ads API...')
   try {
-    const config = getGoogleAdsConfig()
+    // Get refresh token from runtime storage (falls back to env var)
+    let refreshToken: string | undefined
+    try {
+      refreshToken = await getRefreshToken()
+    } catch {
+      console.warn('[FETCH-IDEAS] No refresh token in storage, using env var')
+    }
+    const config = getGoogleAdsConfig(refreshToken)
 
     console.log('[FETCH-IDEAS] Google Ads config check:')
     console.log('[FETCH-IDEAS] - Developer token:', config.developerToken ? 'SET' : 'NOT SET')

@@ -206,6 +206,7 @@ export interface KeywordFilters {
   tiers: string[]
   actions: string[]
   showSelected: boolean | null // null = all, true = selected only, false = unselected only
+  showInAccount: boolean | null // null = all, true = in account only, false = not in account only
 }
 
 // View mode for the details panel
