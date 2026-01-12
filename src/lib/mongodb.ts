@@ -1,6 +1,14 @@
 /**
- * MongoDB Client for Keyword Planner
- * Used as an alternative/backup to Supabase
+ * @deprecated MongoDB Client - NO LONGER USED
+ *
+ * This file is kept for reference but is not imported anywhere.
+ * MongoDB was removed due to SSL connection issues (tlsv1 alert internal error).
+ * All database operations now use Supabase exclusively (see database.ts).
+ *
+ * If you need to re-enable MongoDB in the future:
+ * 1. Fix the SSL/TLS configuration in mongoOptions
+ * 2. Whitelist your IP in MongoDB Atlas
+ * 3. Update database.ts to import from this file again
  */
 
 import { MongoClient, Db, Collection, ObjectId } from 'mongodb'

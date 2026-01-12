@@ -1,7 +1,7 @@
 /**
  * Unified Database Abstraction Layer
- * Writes to both Supabase and MongoDB for comparison
- * Reads from the first available source
+ * Uses Supabase as the primary (and only) database
+ * MongoDB support removed - was causing SSL connection issues
  */
 
 import {
@@ -12,19 +12,6 @@ import {
   getAllResearchSessions as getSupabaseSessions,
   KeywordIdeaDb
 } from './supabase'
-
-import {
-  isMongoConfigured,
-  getCachedKeywordsMongo,
-  setCachedKeywordsMongo,
-  saveAnalysisMongo,
-  getRecentAnalysesMongo,
-  getKeywordVolumesCached,
-  setKeywordVolumesCached,
-  getKeywordVolumeCacheStats,
-  cleanupExpiredKeywordVolumes,
-  KeywordData
-} from './mongodb'
 
 // Unified keyword data type (using Supabase naming convention)
 export interface UnifiedKeywordData {
@@ -66,13 +53,13 @@ function fromSupabaseFormat(data: KeywordIdeaDb[]): UnifiedKeywordData[] {
 export function getDatabaseStatus() {
   return {
     supabase: isSupabaseConfigured(),
-    mongodb: isMongoConfigured(),
-    hasAnyDatabase: isSupabaseConfigured() || isMongoConfigured()
+    mongodb: false,  // MongoDB removed - was causing SSL issues
+    hasAnyDatabase: isSupabaseConfigured()
   }
 }
 
 /**
- * Get cached keywords - tries Supabase first, then MongoDB
+ * Get cached keywords from Supabase
  */
 export async function getCachedKeywords(
   seedKeywords: string[],
@@ -81,7 +68,6 @@ export async function getCachedKeywords(
 ): Promise<UnifiedKeywordData[] | null> {
   const cacheKey = `${seedKeywords.sort().join(',')}_${geoTarget}_${source}`
 
-  // Try Supabase first
   if (isSupabaseConfigured()) {
     try {
       const cached = await getSupabaseCache(cacheKey)
@@ -94,24 +80,11 @@ export async function getCachedKeywords(
     }
   }
 
-  // Try MongoDB as fallback
-  if (isMongoConfigured()) {
-    try {
-      const cached = await getCachedKeywordsMongo(seedKeywords, geoTarget, source)
-      if (cached && cached.length > 0) {
-        console.log('[DB] Cache hit from MongoDB')
-        return cached
-      }
-    } catch (error) {
-      console.log('[DB] MongoDB cache read failed:', error)
-    }
-  }
-
   return null
 }
 
 /**
- * Set cached keywords - writes to ALL configured databases
+ * Set cached keywords to Supabase
  */
 export async function setCachedKeywords(
   seedKeywords: string[],
@@ -121,37 +94,21 @@ export async function setCachedKeywords(
   ttlHours = 168  // 7 days (168 hours) - Google recommends 30 days, 7 is good balance
 ): Promise<void> {
   const cacheKey = `${seedKeywords.sort().join(',')}_${geoTarget}_${source}`
-  const results: string[] = []
 
-  // Write to Supabase
   if (isSupabaseConfigured()) {
     try {
       await setSupabaseCache(cacheKey, toSupabaseFormat(keywords), ttlHours)
-      results.push('supabase')
+      console.log('[DB] Cached to Supabase')
     } catch (error) {
       console.log('[DB] Supabase cache write failed:', error)
     }
-  }
-
-  // Write to MongoDB
-  if (isMongoConfigured()) {
-    try {
-      await setCachedKeywordsMongo(seedKeywords, geoTarget, source, keywords as KeywordData[], ttlHours)
-      results.push('mongodb')
-    } catch (error) {
-      console.log('[DB] MongoDB cache write failed:', error)
-    }
-  }
-
-  if (results.length > 0) {
-    console.log('[DB] Cached to:', results.join(', '))
   } else {
     console.log('[DB] No database available for caching')
   }
 }
 
 /**
- * Save research session - writes to ALL configured databases
+ * Save research session to Supabase
  */
 export async function saveResearchSession(sessionData: {
   courseName: string
@@ -172,10 +129,9 @@ export async function saveResearchSession(sessionData: {
     urgentCount: number
     highPriorityCount: number
   }
-}): Promise<{ supabaseId?: string; mongoId?: string }> {
-  const results: { supabaseId?: string; mongoId?: string } = {}
+}): Promise<{ supabaseId?: string }> {
+  const results: { supabaseId?: string } = {}
 
-  // Save to Supabase
   if (isSupabaseConfigured()) {
     try {
       const session = await saveSupabaseSession({
@@ -210,40 +166,13 @@ export async function saveResearchSession(sessionData: {
     }
   }
 
-  // Save to MongoDB
-  if (isMongoConfigured()) {
-    try {
-      const mongoId = await saveAnalysisMongo({
-        courseId: sessionData.courseName.toLowerCase().replace(/\s+/g, '-'),
-        courseName: sessionData.courseName,
-        courseUrl: sessionData.courseUrl || '',
-        vendor: sessionData.vendor,
-        seedKeywords: sessionData.seedKeywords,
-        rawKeywords: sessionData.keywordIdeas as KeywordData[],
-        analyzedKeywords: sessionData.analyzedKeywords as any[],
-        dataSource: sessionData.dataSource,
-        geoTarget: sessionData.geoTarget,
-        processingTimeMs: sessionData.processingTimeMs,
-        createdAt: new Date(),
-        updatedAt: new Date()
-      })
-      if (mongoId) {
-        results.mongoId = mongoId
-        console.log('[DB] Saved to MongoDB:', mongoId)
-      }
-    } catch (error) {
-      console.error('[DB] MongoDB save failed:', error)
-    }
-  }
-
   return results
 }
 
 /**
- * Get all research sessions - tries Supabase first
+ * Get all research sessions from Supabase
  */
 export async function getAllResearchSessions(limit = 50) {
-  // Try Supabase first
   if (isSupabaseConfigured()) {
     try {
       const sessions = await getSupabaseSessions(limit)
@@ -256,104 +185,55 @@ export async function getAllResearchSessions(limit = 50) {
     }
   }
 
-  // Try MongoDB as fallback
-  if (isMongoConfigured()) {
-    try {
-      const sessions = await getRecentAnalysesMongo(limit)
-      if (sessions.length > 0) {
-        console.log('[DB] Retrieved', sessions.length, 'sessions from MongoDB')
-        return sessions
-      }
-    } catch (error) {
-      console.log('[DB] MongoDB sessions fetch failed:', error)
-    }
-  }
-
   return []
 }
 
 // ============================================================================
-// Individual Keyword Volume Cache (Smart Caching)
+// Individual Keyword Volume Cache
+// Note: These functions are stubs since MongoDB was removed.
+// Keyword volumes are fetched fresh from Google Ads API each time.
+// If caching is needed, implement using Supabase keyword_volumes table.
 // ============================================================================
 
 /**
- * Get cached keyword volumes - returns cached data and list of missing keywords
- * Use this to check cache before making API calls
+ * Get cached keyword volumes
+ * Returns empty cache since MongoDB was removed
  */
 export async function getKeywordVolumes(
   keywords: string[],
-  country: string,
-  source: 'google_ads' | 'keywords_everywhere'
+  _country: string,
+  _source: 'google_ads' | 'keywords_everywhere'
 ): Promise<{ cached: UnifiedKeywordData[]; missing: string[] }> {
-  if (!isMongoConfigured()) {
-    return { cached: [], missing: keywords }
-  }
-
-  try {
-    const result = await getKeywordVolumesCached(keywords, country, source)
-    return {
-      cached: result.cached.map(kw => ({
-        keyword: kw.keyword,
-        avgMonthlySearches: kw.avgMonthlySearches,
-        competition: kw.competition,
-        competitionIndex: kw.competitionIndex,
-        lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
-        highTopOfPageBidMicros: kw.highTopOfPageBidMicros
-      })),
-      missing: result.missing
-    }
-  } catch (error) {
-    console.error('[DB] Get keyword volumes failed:', error)
-    return { cached: [], missing: keywords }
-  }
+  // MongoDB removed - return all keywords as missing (will be fetched fresh)
+  return { cached: [], missing: keywords }
 }
 
 /**
  * Save keyword volumes to cache
- * Call this after fetching fresh data from APIs
+ * No-op since MongoDB was removed
  */
 export async function saveKeywordVolumes(
-  keywords: UnifiedKeywordData[],
-  country: string,
-  source: 'google_ads' | 'keywords_everywhere',
-  ttlDays = 7
+  _keywords: UnifiedKeywordData[],
+  _country: string,
+  _source: 'google_ads' | 'keywords_everywhere',
+  _ttlDays = 7
 ): Promise<number> {
-  if (!isMongoConfigured()) {
-    return 0
-  }
-
-  try {
-    const keywordData: KeywordData[] = keywords.map(kw => ({
-      keyword: kw.keyword,
-      avgMonthlySearches: kw.avgMonthlySearches,
-      competition: kw.competition,
-      competitionIndex: kw.competitionIndex,
-      lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
-      highTopOfPageBidMicros: kw.highTopOfPageBidMicros
-    }))
-    return await setKeywordVolumesCached(keywordData, country, source, ttlDays)
-  } catch (error) {
-    console.error('[DB] Save keyword volumes failed:', error)
-    return 0
-  }
+  // MongoDB removed - no caching
+  return 0
 }
 
 /**
  * Get cache statistics
+ * Returns null since MongoDB was removed
  */
 export async function getVolumeCacheStats() {
-  if (!isMongoConfigured()) {
-    return null
-  }
-  return await getKeywordVolumeCacheStats()
+  return null
 }
 
 /**
  * Cleanup expired cache entries
+ * No-op since MongoDB was removed
  */
 export async function cleanupExpiredVolumes(): Promise<number> {
-  if (!isMongoConfigured()) {
-    return 0
-  }
-  return await cleanupExpiredKeywordVolumes()
+  return 0
 }
