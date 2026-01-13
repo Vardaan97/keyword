@@ -107,6 +107,7 @@ export function KeywordResultsTable({ keywords, courseName }: KeywordResultsTabl
     const headers = [
       'Keyword', 'Search Volume', 'Competition', 'Competition Index',
       'Final Score', 'Base Score', 'Tier', 'Match Type', 'Action', 'Priority',
+      'In Account', 'Account Names',
       'Course Relevance', 'Relevance Status', 'Conversion Potential', 'Search Intent',
       'Vendor Specificity', 'Keyword Specificity', 'Action Word Strength',
       'Commercial Signals', 'Negative Signals', 'Koenig Fit', 'Exclusion Reason'
@@ -123,6 +124,8 @@ export function KeywordResultsTable({ keywords, courseName }: KeywordResultsTabl
       kw.matchType,
       kw.action,
       kw.priority || '',
+      kw.inAccount ? 'Y' : 'N',
+      kw.inAccountNames?.join('; ') || '-',
       kw.courseRelevance,
       kw.relevanceStatus,
       kw.conversionPotential,

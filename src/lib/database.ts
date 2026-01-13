@@ -22,6 +22,7 @@ export interface UnifiedKeywordData {
   lowTopOfPageBidMicros?: number
   highTopOfPageBidMicros?: number
   inAccount?: boolean  // Whether keyword is already in Google Ads account
+  inAccountNames?: string[]  // Names of accounts containing this keyword
 }
 
 // Convert between formats
@@ -32,7 +33,9 @@ function toSupabaseFormat(data: UnifiedKeywordData[]): KeywordIdeaDb[] {
     competition: kw.competition,
     competition_index: kw.competitionIndex,
     low_bid_micros: kw.lowTopOfPageBidMicros,
-    high_bid_micros: kw.highTopOfPageBidMicros
+    high_bid_micros: kw.highTopOfPageBidMicros,
+    in_account: kw.inAccount,
+    in_account_names: kw.inAccountNames
   }))
 }
 
@@ -43,7 +46,9 @@ function fromSupabaseFormat(data: KeywordIdeaDb[]): UnifiedKeywordData[] {
     competition: kw.competition,
     competitionIndex: kw.competition_index,
     lowTopOfPageBidMicros: kw.low_bid_micros,
-    highTopOfPageBidMicros: kw.high_bid_micros
+    highTopOfPageBidMicros: kw.high_bid_micros,
+    inAccount: kw.in_account,
+    inAccountNames: kw.in_account_names
   }))
 }
 

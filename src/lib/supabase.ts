@@ -48,6 +48,8 @@ export interface KeywordIdeaDb {
   competition_index: number
   low_bid_micros?: number
   high_bid_micros?: number
+  in_account?: boolean
+  in_account_names?: string[]
 }
 
 export interface AnalyzedKeywordDb {

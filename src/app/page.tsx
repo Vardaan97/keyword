@@ -1137,12 +1137,12 @@ export default function Home() {
     if (keywords.length === 0) return
 
     const headers = detailViewMode === 'raw'
-      ? ['Keyword', 'Search Volume', 'Competition', 'Competition Index']
-      : ['Keyword', 'Search Volume', 'Competition', 'Final Score', 'Tier', 'Match Type', 'Action', 'Priority', 'Relevance']
+      ? ['Keyword', 'Search Volume', 'Competition', 'Competition Index', 'In Account', 'Account Names']
+      : ['Keyword', 'Search Volume', 'Competition', 'Final Score', 'Tier', 'Match Type', 'Action', 'Priority', 'Relevance', 'In Account', 'Account Names']
 
     const rows = keywords.map(kw => {
       if (detailViewMode === 'raw') {
-        return [kw.keyword, kw.avgMonthlySearches, kw.competition, kw.competitionIndex]
+        return [kw.keyword, kw.avgMonthlySearches, kw.competition, kw.competitionIndex, kw.inAccount ? 'Y' : 'N', kw.inAccountNames?.join('; ') || '-']
       }
       const analyzed = kw as AnalyzedKeyword
       return [
@@ -1154,7 +1154,9 @@ export default function Home() {
         analyzed.matchType,
         analyzed.action,
         analyzed.priority || '',
-        analyzed.relevanceStatus
+        analyzed.relevanceStatus,
+        analyzed.inAccount ? 'Y' : 'N',
+        analyzed.inAccountNames?.join('; ') || '-'
       ]
     })
 
@@ -1182,7 +1184,7 @@ export default function Home() {
 
     const headers = [
       'Course', 'Keyword', 'Search Volume', 'Competition', 'Final Score',
-      'Tier', 'Match Type', 'Action', 'Priority', 'Relevance Status'
+      'Tier', 'Match Type', 'Action', 'Priority', 'Relevance Status', 'In Account', 'Account Names'
     ]
 
     const rows = allKeywords.map(kw => [
@@ -1195,7 +1197,9 @@ export default function Home() {
       kw.matchType,
       kw.action,
       kw.priority || '',
-      kw.relevanceStatus
+      kw.relevanceStatus,
+      kw.inAccount ? 'Y' : 'N',
+      kw.inAccountNames?.join('; ') || '-'
     ])
 
     const csvContent = [
