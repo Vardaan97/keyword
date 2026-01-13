@@ -705,132 +705,57 @@ export async function checkKeywordsInAccounts(keywords: string[]): Promise<Map<s
 // Map to track which accounts contain which keywords (keyword -> account names)
 type AccountKeywordsMap = Map<string, Set<string>>
 
-export async function getKeywordIdeas(
-  config: GoogleAdsConfig,
-  request: KeywordPlannerRequest
-): Promise<KeywordIdea[]> {
-  console.log('[GOOGLE-ADS] Starting keyword ideas request')
-  console.log('[GOOGLE-ADS] API Version:', GOOGLE_ADS_API_VERSION)
-  console.log('[GOOGLE-ADS] Seeds:', request.seedKeywords)
-  console.log('[GOOGLE-ADS] Geo Targets:', request.geoTargetConstants)
-  console.log('[GOOGLE-ADS] Check All Accounts:', request.checkAllAccounts || false)
+// ============================================================================
+// PAGINATION HELPERS FOR KEYWORD IDEAS
+// ============================================================================
 
+/**
+ * Fetch a single page of keyword ideas from the API
+ */
+async function fetchKeywordIdeasPage(
+  config: GoogleAdsConfig,
+  customerId: string,
+  requestBody: Record<string, unknown>
+): Promise<{ results: Record<string, unknown>[]; nextPageToken?: string }> {
+  const cleanCustomerId = customerId.replace(/-/g, '')
+  const loginCustomerId = config.loginCustomerId.replace(/-/g, '')
   const accessToken = await getAccessToken(config)
 
-  // Get currency for bid display - default to INR for Indian accounts
-  const currentAccount = GOOGLE_ADS_ACCOUNTS.find(acc => acc.customerId === request.customerId.replace(/-/g, ''))
-  const bidCurrency = currentAccount?.currency || 'INR'
+  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${cleanCustomerId}:generateKeywordIdeas`
 
-  // Determine which accounts to check based on user selection
-  const accountsToCheck: string[] = []
-  if (request.checkAllAccounts && request.allAccountIds && request.allAccountIds.length > 0) {
-    accountsToCheck.push(...request.allAccountIds)
-    console.log(`[GOOGLE-ADS] Mode: ALL ACCOUNTS (${accountsToCheck.length} accounts)`)
-  } else {
-    accountsToCheck.push(request.customerId)
-    console.log(`[GOOGLE-ADS] Mode: SINGLE ACCOUNT (${getAccountName(request.customerId)})`)
-  }
-
-  // NOTE: New efficient approach - we first get keyword ideas, THEN check only those
-  // specific keywords against account(s) using GAQL IN clause.
-  // This works efficiently even for accounts with 45L+ keywords.
-
-  const customerId = request.customerId.replace(/-/g, '')
-  const loginCustomerId = config.loginCustomerId.replace(/-/g, '')
-
-  const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${customerId}:generateKeywordIdeas`
-  console.log('[GOOGLE-ADS] Request URL:', url)
-
-  // Build the request body
-  // Note: Google Ads API only allows ONE seed type at a time (keywordSeed OR urlSeed)
-  // pageSize controls the max results (up to 1000)
-  const requestBody: Record<string, unknown> = {
-    // Default to India geo target if not specified
-    geoTargetConstants: request.geoTargetConstants || ['geoTargetConstants/2356'], // India
-    language: request.language || 'languageConstants/1000', // English
-    keywordPlanNetwork: 'GOOGLE_SEARCH',
-    includeAdultKeywords: false,
-    // Request more results - Google may return fewer based on relevance
-    pageSize: 1000,
-    // Request keyword annotations to get "in account" status
-    historicalMetricsOptions: {
-      includeAverageCpc: true
-    }
-  }
-
-  // Only use keywordSeed - Google Ads API doesn't allow both seeds at once
-  if (request.seedKeywords && request.seedKeywords.length > 0) {
-    requestBody.keywordSeed = {
-      keywords: request.seedKeywords
-    }
-    console.log('[GOOGLE-ADS] Using keywordSeed with', request.seedKeywords.length, 'keywords:', request.seedKeywords.join(', '))
-  } else if (request.pageUrl) {
-    // Fallback to urlSeed only if no keywords provided
-    requestBody.urlSeed = {
-      url: request.pageUrl
-    }
-    console.log('[GOOGLE-ADS] Using urlSeed:', request.pageUrl)
-  }
-
-  console.log('[GOOGLE-ADS] Request body:', JSON.stringify(requestBody, null, 2))
-
-  // Rate limit before making the generateKeywordIdeas call (per-account)
-  const rateLimitResult = await rateLimitedDelay(customerId)
-  if (!rateLimitResult.allowed) {
-    throw new Error(`Rate limit exceeded for account ${customerId}: ${rateLimitResult.reason}. Please try again later.`)
-  }
-
-  // Use retry wrapper for resilient API calls
-  const data = await withRetry(
-    async () => {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'developer-token': config.developerToken,
-          'login-customer-id': loginCustomerId,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
-      })
-
-      console.log('[GOOGLE-ADS] Response status:', response.status)
-
-      if (!response.ok) {
-        const error = await response.json()
-        const errorMsg = error.error?.message || 'Failed to fetch keyword ideas'
-        console.error('[GOOGLE-ADS] API Error:', JSON.stringify(error, null, 2))
-
-        // Provide more helpful error message for quota issues
-        if (errorMsg.includes('exhausted') || errorMsg.includes('quota')) {
-          throw new Error('Google Ads API quota exhausted. Please wait a few minutes and try again, or use Keywords Everywhere as the data source.')
-        }
-        throw new Error(errorMsg)
-      }
-
-      return response.json()
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'developer-token': config.developerToken,
+      'login-customer-id': loginCustomerId,
+      'Content-Type': 'application/json'
     },
-    'getKeywordIdeas'
-  )
+    body: JSON.stringify(requestBody)
+  })
 
-  console.log('[GOOGLE-ADS] Raw results count:', data.results?.length || 0)
-  if (data.nextPageToken) {
-    console.log('[GOOGLE-ADS] Has next page token - more results available')
-  }
+  if (!response.ok) {
+    const error = await response.json()
+    const errorMsg = error.error?.message || 'Failed to fetch keyword ideas'
 
-  // Log first few results to debug keywordAnnotations structure
-  if (data.results && data.results.length > 0) {
-    console.log('[GOOGLE-ADS] Sample result structure (first keyword):', JSON.stringify(data.results[0], null, 2))
-    // Check if any results have keywordAnnotations
-    const withAnnotations = data.results.filter((r: Record<string, unknown>) => r.keywordAnnotations)
-    console.log('[GOOGLE-ADS] Results with keywordAnnotations:', withAnnotations.length)
-    if (withAnnotations.length > 0) {
-      console.log('[GOOGLE-ADS] Sample annotation:', JSON.stringify(withAnnotations[0].keywordAnnotations, null, 2))
+    // Provide more helpful error message for quota issues
+    if (errorMsg.includes('exhausted') || errorMsg.includes('quota')) {
+      throw new Error('Google Ads API quota exhausted. Please wait a few minutes and try again, or use Keywords Everywhere as the data source.')
     }
+    throw new Error(errorMsg)
   }
 
-  // STEP 1: Parse the keyword ideas response (without "in account" info yet)
-  const keywordIdeas: KeywordIdea[] = (data.results || []).map((result: Record<string, unknown>) => {
+  return response.json()
+}
+
+/**
+ * Parse keyword ideas from API response
+ */
+function parseKeywordIdeasResponse(
+  results: Record<string, unknown>[],
+  bidCurrency: string
+): KeywordIdea[] {
+  return results.map(result => {
     const metrics = result.keywordIdeaMetrics as Record<string, unknown> || {}
 
     // Parse competition
@@ -847,16 +772,128 @@ export async function getKeywordIdeas(
       competitionIndex: Number(metrics.competitionIndex) || 0,
       lowTopOfPageBidMicros: Number(metrics.lowTopOfPageBidMicros) || undefined,
       highTopOfPageBidMicros: Number(metrics.highTopOfPageBidMicros) || undefined,
-      bidCurrency,  // Include the account's currency for proper display
-      inAccount: false,  // Will be updated in step 2
-      inAccountNames: []  // Will be updated in step 2
+      bidCurrency,
+      inAccount: false,
+      inAccountNames: []
     }
   })
+}
+
+export async function getKeywordIdeas(
+  config: GoogleAdsConfig,
+  request: KeywordPlannerRequest
+): Promise<KeywordIdea[]> {
+  console.log('[GOOGLE-ADS] Starting keyword ideas request')
+  console.log('[GOOGLE-ADS] API Version:', GOOGLE_ADS_API_VERSION)
+  console.log('[GOOGLE-ADS] Seeds:', request.seedKeywords)
+  console.log('[GOOGLE-ADS] Geo Targets:', request.geoTargetConstants)
+  console.log('[GOOGLE-ADS] Check All Accounts:', request.checkAllAccounts || false)
+
+  // Get currency for bid display - default to INR for Indian accounts
+  const currentAccount = GOOGLE_ADS_ACCOUNTS.find(acc => acc.customerId === request.customerId.replace(/-/g, ''))
+  const bidCurrency = currentAccount?.currency || 'INR'
+
+  // Determine which accounts to check based on user selection
+  const accountsToCheck: string[] = []
+  if (request.checkAllAccounts && request.allAccountIds && request.allAccountIds.length > 0) {
+    accountsToCheck.push(...request.allAccountIds)
+    console.log(`[GOOGLE-ADS] Mode: ALL ACCOUNTS (${accountsToCheck.length} accounts)`)
+  } else {
+    accountsToCheck.push(request.customerId)
+    console.log(`[GOOGLE-ADS] Mode: SINGLE ACCOUNT (${getAccountName(request.customerId)})`)
+  }
+
+  // NOTE: New efficient approach - we first get keyword ideas with PAGINATION,
+  // THEN check only those specific keywords against account(s) using GAQL IN clause.
+  // This works efficiently even for accounts with 45L+ keywords.
+
+  const customerId = request.customerId.replace(/-/g, '')
+
+  // Build the base request body
+  // Note: Google Ads API only allows ONE seed type at a time (keywordSeed OR urlSeed)
+  // pageSize controls the max results per page (up to 1000)
+  const baseRequestBody: Record<string, unknown> = {
+    geoTargetConstants: request.geoTargetConstants || ['geoTargetConstants/2356'], // India
+    language: request.language || 'languageConstants/1000', // English
+    keywordPlanNetwork: 'GOOGLE_SEARCH',
+    includeAdultKeywords: false,
+    pageSize: 1000,
+    historicalMetricsOptions: {
+      includeAverageCpc: true
+    }
+  }
+
+  // Only use keywordSeed - Google Ads API doesn't allow both seeds at once
+  if (request.seedKeywords && request.seedKeywords.length > 0) {
+    baseRequestBody.keywordSeed = {
+      keywords: request.seedKeywords
+    }
+    console.log('[GOOGLE-ADS] Using keywordSeed with', request.seedKeywords.length, 'keywords:', request.seedKeywords.join(', '))
+  } else if (request.pageUrl) {
+    // Fallback to urlSeed only if no keywords provided
+    baseRequestBody.urlSeed = {
+      url: request.pageUrl
+    }
+    console.log('[GOOGLE-ADS] Using urlSeed:', request.pageUrl)
+  }
+
+  // ============================================================================
+  // PAGINATION LOOP - Fetch ALL pages of keyword ideas
+  // ============================================================================
+  const MAX_PAGES = 10  // Safety limit: 10 pages = 10,000 keywords max
+  const allKeywordIdeas: KeywordIdea[] = []
+  let pageToken: string | undefined = undefined
+  let pageCount = 0
+
+  console.log('[GOOGLE-ADS] Starting pagination - fetching ALL keyword ideas...')
+
+  do {
+    // Build request body for this page
+    const requestBody = { ...baseRequestBody }
+    if (pageToken) {
+      requestBody.pageToken = pageToken
+    }
+
+    // Rate limit before each API call
+    const rateLimitResult = await rateLimitedDelay(customerId)
+    if (!rateLimitResult.allowed) {
+      console.log(`[GOOGLE-ADS] Rate limit hit after ${pageCount} pages, returning partial results`)
+      break
+    }
+
+    // Fetch page with retry wrapper
+    const data = await withRetry(
+      async () => fetchKeywordIdeasPage(config, customerId, requestBody),
+      `getKeywordIdeas-page${pageCount + 1}`
+    )
+
+    // Parse this page's keywords
+    const pageKeywords = parseKeywordIdeasResponse(data.results || [], bidCurrency)
+    allKeywordIdeas.push(...pageKeywords)
+
+    // Get next page token
+    pageToken = data.nextPageToken
+    pageCount++
+
+    console.log(`[GOOGLE-ADS] Fetched page ${pageCount}: ${pageKeywords.length} keywords (total: ${allKeywordIdeas.length})`)
+
+    // Log sample from first page
+    if (pageCount === 1 && data.results && data.results.length > 0) {
+      console.log('[GOOGLE-ADS] Sample result structure (first keyword):', JSON.stringify(data.results[0], null, 2))
+    }
+
+  } while (pageToken && pageCount < MAX_PAGES)
+
+  console.log(`[GOOGLE-ADS] Pagination complete: ${allKeywordIdeas.length} keywords fetched across ${pageCount} page(s)`)
+
+  if (pageToken) {
+    console.log('[GOOGLE-ADS] WARNING: More pages available but hit MAX_PAGES limit')
+  }
 
   // Filter out zero-volume keywords which are less useful
-  const filteredIdeas = keywordIdeas.filter(kw => kw.avgMonthlySearches > 0)
+  const filteredIdeas = allKeywordIdeas.filter(kw => kw.avgMonthlySearches > 0)
 
-  console.log('[GOOGLE-ADS] Parsed keyword ideas:', keywordIdeas.length, '(with volume:', filteredIdeas.length, ')')
+  console.log('[GOOGLE-ADS] Keywords with volume:', filteredIdeas.length)
 
   if (filteredIdeas.length > 0) {
     console.log('[GOOGLE-ADS] Top keyword:', filteredIdeas[0].keyword, '- volume:', filteredIdeas[0].avgMonthlySearches)
