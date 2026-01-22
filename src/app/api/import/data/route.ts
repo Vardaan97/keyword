@@ -30,12 +30,10 @@ export async function GET(request: NextRequest) {
 
     if (type === 'structure') {
       // Try old system first
-      let data = await client.query(api.imports.getAccountStructure, { accountId })
+      const legacyData = await client.query(api.imports.getAccountStructure, { accountId })
 
       // If no data, try new gadsEditorImport system
-      if (!data) {
-        data = await getStructureFromEditorImport(client)
-      }
+      const data = legacyData || await getStructureFromEditorImport(client)
 
       return NextResponse.json({
         success: true,
@@ -51,10 +49,7 @@ export async function GET(request: NextRequest) {
     ])
 
     // Try new system for structure if legacy is empty
-    let structure = legacyStructure
-    if (!structure) {
-      structure = await getStructureFromEditorImport(client)
-    }
+    const structure = legacyStructure || await getStructureFromEditorImport(client)
 
     return NextResponse.json({
       success: true,

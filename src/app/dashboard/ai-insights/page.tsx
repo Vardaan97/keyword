@@ -547,7 +547,7 @@ export default function AIInsightsPage() {
                   .map((insight, idx) => (
                     <InsightCard
                       key={(insight as any)._id || `high-${idx}`}
-                      insight={insight}
+                      insight={insight as GeneratedInsight & { _id?: string; status?: string }}
                       onAction={handleAction}
                       onDismiss={handleDismiss}
                     />
@@ -568,7 +568,7 @@ export default function AIInsightsPage() {
                   .map((insight, idx) => (
                     <InsightCard
                       key={(insight as any)._id || `other-${idx}`}
-                      insight={insight}
+                      insight={insight as GeneratedInsight & { _id?: string; status?: string }}
                       onAction={handleAction}
                       onDismiss={handleDismiss}
                     />

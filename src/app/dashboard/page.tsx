@@ -77,10 +77,10 @@ export default function DashboardOverview() {
   const [error, setError] = useState<string | null>(null)
 
   // Convex queries for algorithms and insights
-  const algorithms = useQuery(api.autoPpcRules.list)
-  const algorithmExecutionCounts = useQuery(api.autoPpcExecutions.countsByAlgorithm)
+  const algorithms = useQuery(api.autoPpcRules.list, {})
+  const algorithmExecutionCounts = useQuery(api.autoPpcExecutions.countsByAlgorithm, {})
   const topInsights = useQuery(api.aiInsights.getTopInsights, { limit: 3 })
-  const insightCounts = useQuery(api.aiInsights.countsByType)
+  const insightCounts = useQuery(api.aiInsights.countsByType, {})
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -462,7 +462,7 @@ export default function DashboardOverview() {
               <h3 className="text-lg font-semibold text-[var(--text-primary)]">AI Insights</h3>
               {insightCounts && (
                 <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-[var(--accent-violet)]/15 text-[var(--accent-violet)]">
-                  {(insightCounts.opportunity || 0) + (insightCounts.risk || 0) + (insightCounts.recommendation || 0)} Active
+                  {(insightCounts.opportunity?.total || 0) + (insightCounts.risk?.total || 0) + (insightCounts.recommendation?.total || 0)} Active
                 </span>
               )}
             </div>

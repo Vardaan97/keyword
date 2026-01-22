@@ -122,10 +122,7 @@ function buildHeadlineDescriptionIndices(headers: string[]) {
   }
 }
 
-interface ParsedRow {
-  type: 'campaign' | 'adGroup' | 'keyword' | 'ad' | 'unknown'
-  data: Record<string, unknown>
-}
+// ParsedRow interface removed - not used (row parsing is inline in POST handler)
 
 interface ImportStats {
   totalRows: number
@@ -543,137 +540,7 @@ function createUTF16LEToUTF8Transform(): Transform {
   })
 }
 
-/**
- * Parse a row and determine its type
- *
- * Row type is determined by what's populated:
- * - Keyword row: has keyword field
- * - Ad row: has ad type field
- * - Ad Group row: has ad group but no keyword/ad (first occurrence of ad group)
- * - Campaign row: has campaign but no ad group (first occurrence of campaign)
- */
-function parseRow(columns: string[], accountId: string, importId: string): ParsedRow {
-  const campaign = columns[COLUMN_MAP.campaign]?.trim()
-  const adGroup = columns[COLUMN_MAP.adGroup]?.trim()
-  const keyword = columns[COLUMN_MAP.keyword]?.trim()
-  const adType = columns[COLUMN_MAP.adType]?.trim()
-
-  // Get status columns
-  const campaignStatus = columns[COLUMN_MAP.campaignStatus]?.trim()
-  const adGroupStatus = columns[COLUMN_MAP.adGroupStatus]?.trim()
-  const status = columns[COLUMN_MAP.status]?.trim()
-
-  // Priority 1: Keyword rows (have keyword populated)
-  if (keyword) {
-    return {
-      type: 'keyword',
-      data: {
-        importId,
-        accountId,
-        campaignName: campaign || '',
-        adGroupName: adGroup || '',
-        keyword,
-        matchType: columns[COLUMN_MAP.keywordMatchType]?.trim() || 'Broad',
-        firstPageBid: parseNumber(columns[COLUMN_MAP.firstPageBid]),
-        topOfPageBid: parseNumber(columns[COLUMN_MAP.topOfPageBid]),
-        firstPositionBid: parseNumber(columns[COLUMN_MAP.firstPositionBid]),
-        qualityScore: parseNumber(columns[COLUMN_MAP.qualityScore]),
-        landingPageExperience: columns[COLUMN_MAP.landingPageExperience]?.trim(),
-        expectedCtr: columns[COLUMN_MAP.expectedCtr]?.trim(),
-        adRelevance: columns[COLUMN_MAP.adRelevance]?.trim(),
-        status: status || 'Enabled',
-      },
-    }
-  }
-
-  // Priority 2: Ad rows (have ad type populated)
-  if (adType) {
-    const headlines: string[] = []
-    const descriptions: string[] = []
-
-    for (const idx of COLUMN_MAP.headlines) {
-      const h = columns[idx]?.trim()
-      if (h) headlines.push(h)
-    }
-
-    for (const idx of COLUMN_MAP.descriptions) {
-      const d = columns[idx]?.trim()
-      if (d) descriptions.push(d)
-    }
-
-    return {
-      type: 'ad',
-      data: {
-        importId,
-        accountId,
-        campaignName: campaign || '',
-        adGroupName: adGroup || '',
-        adType,
-        finalUrl: columns[COLUMN_MAP.finalUrl]?.trim(),
-        headlines,
-        descriptions,
-        path1: columns[COLUMN_MAP.path1]?.trim(),
-        path2: columns[COLUMN_MAP.path2]?.trim(),
-        status: status || 'Enabled',
-        approvalStatus: columns[COLUMN_MAP.approvalStatus]?.trim(),
-        adStrength: columns[COLUMN_MAP.adStrength]?.trim(),
-      },
-    }
-  }
-
-  // Priority 3: Ad Group rows (have ad group but no keyword/ad)
-  // We track unique ad groups, so even if there are multiple rows with same ad group,
-  // we'll only create one ad group record
-  if (adGroup && campaign) {
-    return {
-      type: 'adGroup',
-      data: {
-        importId,
-        accountId,
-        campaignName: campaign,
-        adGroupName: adGroup,
-        adGroupType: columns[COLUMN_MAP.adGroupType]?.trim(),
-        maxCpc: parseNumber(columns[COLUMN_MAP.maxCpc]),
-        maxCpm: parseNumber(columns[COLUMN_MAP.maxCpm]),
-        targetCpc: parseNumber(columns[COLUMN_MAP.targetCpc]),
-        targetRoas: parseNumber(columns[COLUMN_MAP.adGroupTargetRoas]),
-        desktopBidModifier: parseNumber(columns[COLUMN_MAP.desktopBidModifier]),
-        mobileBidModifier: parseNumber(columns[COLUMN_MAP.mobileBidModifier]),
-        tabletBidModifier: parseNumber(columns[COLUMN_MAP.tabletBidModifier]),
-        optimizedTargeting: columns[COLUMN_MAP.optimizedTargeting]?.trim() || undefined,
-        status: adGroupStatus || status || 'Enabled',
-      },
-    }
-  }
-
-  // Priority 4: Campaign rows (have campaign but no ad group)
-  if (campaign) {
-    return {
-      type: 'campaign',
-      data: {
-        importId,
-        accountId,
-        campaignName: campaign,
-        labels: parseLabels(columns[COLUMN_MAP.campaignLabels]),
-        campaignType: columns[COLUMN_MAP.campaignType]?.trim(),
-        networks: columns[COLUMN_MAP.networks]?.trim(),
-        budget: parseNumber(columns[COLUMN_MAP.budget]),
-        budgetType: columns[COLUMN_MAP.budgetType]?.trim(),
-        bidStrategyType: columns[COLUMN_MAP.bidStrategyType]?.trim(),
-        bidStrategyName: columns[COLUMN_MAP.bidStrategyName]?.trim(),
-        targetCpa: parseNumber(columns[COLUMN_MAP.targetCpa]),
-        targetRoas: parseNumber(columns[COLUMN_MAP.targetRoas]),
-        maxCpcBidLimit: parseNumber(columns[COLUMN_MAP.maxCpcBidLimit]),
-        startDate: columns[COLUMN_MAP.startDate]?.trim(),
-        endDate: columns[COLUMN_MAP.endDate]?.trim(),
-        adSchedule: columns[COLUMN_MAP.adSchedule]?.trim(),
-        status: campaignStatus || status || 'Enabled',
-      },
-    }
-  }
-
-  return { type: 'unknown', data: {} }
-}
+// parseRow function removed - logic is inline in the POST handler
 
 function parseNumber(value: string | undefined): number | undefined {
   if (!value) return undefined
