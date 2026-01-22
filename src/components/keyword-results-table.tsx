@@ -21,12 +21,13 @@ import {
 interface KeywordResultsTableProps {
   keywords: AnalyzedKeyword[]
   courseName: string
+  courseUrl?: string
 }
 
 type SortField = 'keyword' | 'avgMonthlySearches' | 'finalScore' | 'competition' | 'tier'
 type SortDirection = 'asc' | 'desc'
 
-export function KeywordResultsTable({ keywords, courseName }: KeywordResultsTableProps) {
+export function KeywordResultsTable({ keywords, courseName, courseUrl }: KeywordResultsTableProps) {
   const [searchTerm, setSearchTerm] = useState("")
   const [sortField, setSortField] = useState<SortField>('finalScore')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
@@ -110,7 +111,8 @@ export function KeywordResultsTable({ keywords, courseName }: KeywordResultsTabl
       'In Account', 'Account Names',
       'Course Relevance', 'Relevance Status', 'Conversion Potential', 'Search Intent',
       'Vendor Specificity', 'Keyword Specificity', 'Action Word Strength',
-      'Commercial Signals', 'Negative Signals', 'Koenig Fit', 'Exclusion Reason'
+      'Commercial Signals', 'Negative Signals', 'Koenig Fit', 'Exclusion Reason',
+      'Course URL'
     ]
 
     const rows = filteredAndSortedKeywords.map(kw => [
@@ -136,7 +138,8 @@ export function KeywordResultsTable({ keywords, courseName }: KeywordResultsTabl
       kw.commercialSignals,
       kw.negativeSignals,
       kw.koenigFit,
-      kw.exclusionReason || ''
+      kw.exclusionReason || '',
+      courseUrl || ''
     ])
 
     const csvContent = [

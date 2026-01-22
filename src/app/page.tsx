@@ -20,6 +20,10 @@ import { generateId, formatNumber, downloadCSV } from "@/lib/utils"
 import Papa from "papaparse"
 import { ToastProvider } from "@/components/toast-provider"
 import { GoogleAdsStatus } from "@/components/google-ads-status"
+import { SessionHistory, FullSession } from "@/components/session-history"
+import { usePrompts } from "@/hooks/usePrompts"
+import { PromptVersionHistory } from "@/components/prompt-version-history"
+import { SmartCacheAlert } from "@/components/smart-cache-alert"
 
 // Format elapsed time as mm:ss
 function formatTime(ms: number): string {
@@ -149,11 +153,6 @@ function preFilterKeywords(keywords: KeywordIdea[], courseName: string, geoTarge
 
 export default function Home() {
   const {
-    seedPrompt,
-    analysisPrompt,
-    setSeedPrompt,
-    setAnalysisPrompt,
-    resetPrompts,
     sessionHistory,
     addToHistory,
     dataSource,
@@ -169,6 +168,41 @@ export default function Home() {
     setTheme
   } = useAppStore()
 
+  // Use Convex prompts with versioning
+  const {
+    seedPrompt,
+    analysisPrompt,
+    seedVersion,
+    analysisVersion,
+    isLoading: isLoadingPrompts,
+    isSaving: isSavingPrompt,
+    error: promptError,
+    isConvexAvailable,
+    needsSeeding,
+    savePrompt,
+    rollbackPrompt,
+    fetchVersionHistory,
+    refreshPrompts,
+    seedDefaults
+  } = usePrompts()
+
+  // Local editing state for prompts (before saving to Convex)
+  const [editedSeedPrompt, setEditedSeedPrompt] = useState<string>('')
+  const [editedAnalysisPrompt, setEditedAnalysisPrompt] = useState<string>('')
+
+  // Sync local edit state when Convex prompts load
+  useEffect(() => {
+    if (seedPrompt?.prompt) {
+      setEditedSeedPrompt(seedPrompt.prompt)
+    }
+  }, [seedPrompt?.prompt])
+
+  useEffect(() => {
+    if (analysisPrompt?.prompt) {
+      setEditedAnalysisPrompt(analysisPrompt.prompt)
+    }
+  }, [analysisPrompt?.prompt])
+
   // Batch processing state
   const [batchItems, setBatchItems] = useState<BatchCourseItem[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
@@ -181,6 +215,26 @@ export default function Home() {
   const abortRef = useRef(false)
   const abortControllerRef = useRef<AbortController | null>(null)
 
+  // Version history modal state
+  const [showVersionHistory, setShowVersionHistory] = useState<'seed' | 'analysis' | null>(null)
+
+  // Smart cache alert state
+  const [smartCacheAlert, setSmartCacheAlert] = useState<{
+    item: BatchCourseItem
+    sessionData: {
+      courseName: string
+      createdAt: number
+      keywordsCount: number
+      analyzedCount: number
+      toAddCount: number
+      urgentCount: number
+      geoTarget: string
+      keywordIdeas: KeywordIdea[]
+      analyzedKeywords: AnalyzedKeyword[]
+      seedKeywords: string[]
+    }
+  } | null>(null)
+
   // Timer state
   const [elapsedTime, setElapsedTime] = useState(0)
   const timerRef = useRef<NodeJS.Timeout | null>(null)
@@ -190,6 +244,9 @@ export default function Home() {
 
   // Raw keywords modal state (for viewing during processing)
   const [showRawKeywordsModal, setShowRawKeywordsModal] = useState(false)
+
+  // Session History modal state
+  const [showSessionHistory, setShowSessionHistory] = useState(false)
 
   // Input mode: CSV upload or manual entry
   const [inputMode, setInputMode] = useState<'csv' | 'manual'>('csv')
@@ -338,6 +395,34 @@ export default function Home() {
         setSelectedItemId(savedBatchItems[0].id)
       }
     }
+  }
+
+  // Load session from Convex history
+  const loadSessionFromHistory = (session: FullSession) => {
+    console.log('[SESSION] Loading session from history:', session.courseName)
+
+    // Convert the Convex session to a BatchCourseItem
+    const batchItem: BatchCourseItem = {
+      id: generateId(),
+      rowIndex: 0,
+      courseInput: {
+        courseName: session.courseName,
+        courseUrl: session.courseUrl || '',
+        certificationCode: session.certificationCode,
+        primaryVendor: session.vendor,
+        targetGeography: session.geoTarget
+      },
+      status: 'completed',
+      seedKeywords: session.seedKeywords.map(kw => ({ keyword: kw, source: 'ai_generated' as const })),
+      keywordIdeas: session.keywordIdeas || [],
+      analyzedKeywords: (session.analyzedKeywords || []) as AnalyzedKeyword[],
+      dataSource: session.dataSource === 'google_ads' ? 'google_ads' : 'keywords_everywhere',
+      cacheHit: true
+    }
+
+    setBatchItems([batchItem])
+    setSelectedItemId(batchItem.id)
+    setActiveView('results')
   }
 
   // Parse CSV file
@@ -755,6 +840,134 @@ export default function Home() {
     } catch (err) {
       console.log('[SAVE] Failed to save to databases:', err)
     }
+
+    // Save to Convex for session history with prompt versions for smart cache
+    try {
+      const convexResponse = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          courseName: processedItem.courseInput.courseName,
+          courseUrl: processedItem.courseInput.courseUrl,
+          vendor: processedItem.courseInput.primaryVendor,
+          certificationCode: processedItem.courseInput.certificationCode,
+          seedKeywords: processedItem.seedKeywords.map(s => s.keyword),
+          keywordIdeas: processedItem.keywordIdeas,
+          analyzedKeywords: processedItem.analyzedKeywords,
+          dataSource: processedItem.dataSource || dataSource,
+          geoTarget: targetCountry,
+          status: 'completed',
+          // Include prompt versions for smart cache matching
+          seedPromptVersion: seedVersion,
+          analysisPromptVersion: analysisVersion
+        })
+      })
+      const convexResult = await convexResponse.json()
+      if (convexResult.saved) {
+        console.log('[SAVE] Session saved to Convex:', convexResult.sessionId)
+      }
+    } catch (err) {
+      console.log('[SAVE] Failed to save to Convex:', err)
+    }
+  }
+
+  // Check for smart cache match (existing session with same URL, seeds, and prompt versions)
+  const checkSmartCache = async (item: BatchCourseItem): Promise<{
+    match: boolean
+    sessionData?: {
+      courseName: string
+      createdAt: number
+      keywordsCount: number
+      analyzedCount: number
+      toAddCount: number
+      urgentCount: number
+      geoTarget: string
+      keywordIdeas: KeywordIdea[]
+      analyzedKeywords: AnalyzedKeyword[]
+      seedKeywords: string[]
+    }
+  }> => {
+    // Only check if we have valid prompt versions (> 0 means prompts are seeded in Convex)
+    if (seedVersion === 0 || analysisVersion === 0) {
+      console.log('[SMART-CACHE] Skipping check - prompts not yet seeded in Convex')
+      return { match: false }
+    }
+
+    // We need seed keywords to check - generate them first if not available
+    // Actually, we can't check before generating seeds. This check should happen
+    // AFTER seed generation but BEFORE fetching keywords from Google Ads
+    // For now, this will be called from within the processing flow after seeds are generated
+    return { match: false }
+  }
+
+  // Check smart cache after seeds are generated (called during processing)
+  const checkSmartCacheAfterSeeds = async (
+    courseUrl: string,
+    seedKeywords: string[]
+  ): Promise<{
+    match: boolean
+    sessionData?: {
+      courseName: string
+      createdAt: number
+      keywordsCount: number
+      analyzedCount: number
+      toAddCount: number
+      urgentCount: number
+      geoTarget: string
+      keywordIdeas: KeywordIdea[]
+      analyzedKeywords: AnalyzedKeyword[]
+      seedKeywords: string[]
+    }
+  }> => {
+    // Only check if we have valid prompt versions
+    if (seedVersion === 0 || analysisVersion === 0) {
+      return { match: false }
+    }
+
+    try {
+      const response = await fetch('/api/sessions/find-match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          courseUrl,
+          seedKeywords,
+          geoTarget: targetCountry,
+          seedPromptVersion: seedVersion,
+          analysisPromptVersion: analysisVersion
+        })
+      })
+
+      if (!response.ok) {
+        console.log('[SMART-CACHE] Check failed:', response.statusText)
+        return { match: false }
+      }
+
+      const result = await response.json()
+
+      if (result.match && result.cacheHit) {
+        console.log('[SMART-CACHE] Match found!', result.match.courseName)
+        return {
+          match: true,
+          sessionData: {
+            courseName: result.match.courseName,
+            createdAt: result.match.createdAt,
+            keywordsCount: result.match.keywordsCount,
+            analyzedCount: result.match.analyzedCount,
+            toAddCount: result.match.toAddCount,
+            urgentCount: result.match.urgentCount,
+            geoTarget: result.match.geoTarget,
+            keywordIdeas: result.match.keywordIdeas || [],
+            analyzedKeywords: result.match.analyzedKeywords || [],
+            seedKeywords: result.match.seedKeywords || []
+          }
+        }
+      }
+
+      return { match: false }
+    } catch (err) {
+      console.log('[SMART-CACHE] Error checking cache:', err)
+      return { match: false }
+    }
   }
 
   // Start batch processing with concurrent execution
@@ -912,8 +1125,41 @@ export default function Home() {
 
       if (signal.aborted) throw new Error('Processing stopped by user')
 
-      // ========== STEP 2: Check Cache ==========
-      updateProgress('check_cache', 'in_progress', 'Looking for cached data...', 2)
+      // ========== STEP 2: Smart Cache Check ==========
+      // Check if this URL + seeds + prompt versions was already processed
+      updateProgress('check_cache', 'in_progress', 'Checking smart cache...', 2)
+
+      const smartCacheResult = await checkSmartCacheAfterSeeds(
+        item.courseInput.courseUrl,
+        seedResult.data.map((s: SeedKeyword) => s.keyword)
+      )
+
+      if (smartCacheResult.match && smartCacheResult.sessionData) {
+        // Smart cache hit! Return cached data directly
+        console.log(`[SMART-CACHE] Using cached session for: ${item.courseInput.courseName}`)
+        updateProgress('check_cache', 'completed', 'Smart cache hit! Using existing results')
+        updateProgress('fetch_keywords', 'completed', `${smartCacheResult.sessionData.keywordsCount} keywords from cache`)
+        updateProgress('save_cache', 'completed', 'Skipped - using cached data')
+        updateProgress('analyze', 'completed', `${smartCacheResult.sessionData.analyzedCount} keywords analyzed (cached)`)
+        updateProgress('complete', 'completed', 'Completed from smart cache!')
+
+        const processingTime = Date.now() - startTime
+        return {
+          ...updatedItem,
+          seedKeywords: smartCacheResult.sessionData.seedKeywords.map(kw => ({ keyword: kw, source: 'ai_generated' as const })),
+          keywordIdeas: smartCacheResult.sessionData.keywordIdeas,
+          analyzedKeywords: smartCacheResult.sessionData.analyzedKeywords,
+          status: 'completed' as BatchItemStatus,
+          cacheHit: true,
+          dataSource: 'smart_cache',
+          endTime: Date.now(),
+          processingTimeMs: processingTime,
+          progress
+        }
+      }
+
+      // No smart cache hit - continue with regular processing
+      updateProgress('check_cache', 'completed', 'No smart cache match - proceeding with API')
 
       // ========== STEP 3: Fetch Keywords (with rate limiting delay) ==========
       // Wait for the staggered delay before making Google API call
@@ -1136,13 +1382,16 @@ export default function Home() {
 
     if (keywords.length === 0) return
 
+    // Course URL added as last column
+    const courseUrl = selectedItem.courseInput.courseUrl || ''
+
     const headers = detailViewMode === 'raw'
-      ? ['Keyword', 'Search Volume', 'Competition', 'Competition Index', 'In Account', 'Account Names']
-      : ['Keyword', 'Search Volume', 'Competition', 'Final Score', 'Tier', 'Match Type', 'Action', 'Priority', 'Relevance', 'In Account', 'Account Names']
+      ? ['Keyword', 'Search Volume', 'Competition', 'Competition Index', 'In Account', 'Account Names', 'Course URL']
+      : ['Keyword', 'Search Volume', 'Competition', 'Final Score', 'Tier', 'Match Type', 'Action', 'Priority', 'Relevance', 'In Account', 'Account Names', 'Course URL']
 
     const rows = keywords.map(kw => {
       if (detailViewMode === 'raw') {
-        return [kw.keyword, kw.avgMonthlySearches, kw.competition, kw.competitionIndex, kw.inAccount ? 'Y' : 'N', kw.inAccountNames?.join('; ') || '-']
+        return [kw.keyword, kw.avgMonthlySearches, kw.competition, kw.competitionIndex, kw.inAccount ? 'Y' : 'N', kw.inAccountNames?.join('; ') || '-', courseUrl]
       }
       const analyzed = kw as AnalyzedKeyword
       return [
@@ -1156,7 +1405,8 @@ export default function Home() {
         analyzed.priority || '',
         analyzed.relevanceStatus,
         analyzed.inAccount ? 'Y' : 'N',
-        analyzed.inAccountNames?.join('; ') || '-'
+        analyzed.inAccountNames?.join('; ') || '-',
+        courseUrl
       ]
     })
 
@@ -1178,13 +1428,15 @@ export default function Home() {
     const allKeywords = completedItems.flatMap(item =>
       item.analyzedKeywords.map(kw => ({
         course: item.courseInput.courseName,
+        courseUrl: item.courseInput.courseUrl || '',
         ...kw
       }))
     )
 
+    // Course URL added as last column
     const headers = [
       'Course', 'Keyword', 'Search Volume', 'Competition', 'Final Score',
-      'Tier', 'Match Type', 'Action', 'Priority', 'Relevance Status', 'In Account', 'Account Names'
+      'Tier', 'Match Type', 'Action', 'Priority', 'Relevance Status', 'In Account', 'Account Names', 'Course URL'
     ]
 
     const rows = allKeywords.map(kw => [
@@ -1199,7 +1451,8 @@ export default function Home() {
       kw.priority || '',
       kw.relevanceStatus,
       kw.inAccount ? 'Y' : 'N',
-      kw.inAccountNames?.join('; ') || '-'
+      kw.inAccountNames?.join('; ') || '-',
+      kw.courseUrl
     ])
 
     const csvContent = [
@@ -1295,6 +1548,17 @@ export default function Home() {
               </div>
             </div>
 
+            {/* History Button */}
+            <button
+              onClick={() => setShowSessionHistory(true)}
+              className="px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors flex items-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              History
+            </button>
+
             <button
               onClick={() => setShowPromptEditor(!showPromptEditor)}
               className="px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors flex items-center gap-2"
@@ -1324,7 +1588,19 @@ export default function Home() {
           <div className="relative w-full max-w-2xl bg-[var(--bg-secondary)] border-l border-[var(--border-default)] overflow-y-auto">
             <div className="p-6 border-b border-[var(--border-subtle)]">
               <div className="flex items-center justify-between">
-                <h2 className="font-display font-bold text-xl">AI Prompts</h2>
+                <div>
+                  <h2 className="font-display font-bold text-xl">AI Prompts</h2>
+                  {isConvexAvailable && (
+                    <p className="text-xs text-[var(--text-muted)] mt-1">
+                      Stored in Convex - changes are saved as new versions
+                    </p>
+                  )}
+                  {needsSeeding && (
+                    <p className="text-xs text-[var(--accent-amber)] mt-1">
+                      Using defaults - click "Initialize" to save to Convex
+                    </p>
+                  )}
+                </div>
                 <button onClick={() => setShowPromptEditor(false)} className="p-2 hover:bg-[var(--bg-hover)] rounded-lg transition-colors">
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -1333,65 +1609,191 @@ export default function Home() {
               </div>
             </div>
             <div className="p-6 space-y-6">
+              {/* Prompt Error */}
+              {promptError && (
+                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
+                  {promptError}
+                </div>
+              )}
+
+              {/* Initialize Button if needed */}
+              {needsSeeding && (
+                <button
+                  onClick={seedDefaults}
+                  disabled={isSavingPrompt}
+                  className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-[var(--accent-lime)] to-[var(--accent-electric)] hover:opacity-90 text-black text-sm font-medium transition-opacity disabled:opacity-50"
+                >
+                  {isSavingPrompt ? 'Initializing...' : 'Initialize Prompts in Convex'}
+                </button>
+              )}
+
               {/* Seed Prompt */}
               <div className="p-4 rounded-xl bg-[var(--bg-tertiary)] border border-[var(--border-subtle)]">
-                <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-[var(--accent-lime)]" />
                     <span className="font-medium text-sm">Seed Keyword Generator</span>
                   </div>
+                  <span className={`px-2 py-0.5 rounded-full text-xs font-mono font-bold ${
+                    seedVersion > 0
+                      ? 'bg-[var(--accent-lime)]/20 text-[var(--accent-lime)]'
+                      : 'bg-[var(--accent-amber)]/20 text-[var(--accent-amber)]'
+                  }`}>
+                    {seedVersion > 0 ? `v${seedVersion}` : 'Default'}
+                  </span>
+                </div>
+                {seedPrompt?.lastUpdated && seedVersion > 0 && (
+                  <p className="text-xs text-[var(--text-muted)] mb-3">
+                    Last updated: {new Date(seedPrompt.lastUpdated).toLocaleDateString('en-IN', {
+                      day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
+                    })}
+                  </p>
+                )}
+                <div className="flex items-center gap-2 mb-3">
+                  <button
+                    onClick={() => setShowVersionHistory('seed')}
+                    disabled={seedVersion === 0}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                      seedVersion > 0
+                        ? 'bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] border-[var(--border-subtle)]'
+                        : 'bg-[var(--bg-elevated)]/50 border-[var(--border-subtle)]/50 text-[var(--text-muted)] cursor-not-allowed'
+                    }`}
+                  >
+                    <svg className="w-3 h-3 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    History {seedVersion > 0 && `(${seedVersion} versions)`}
+                  </button>
                   <button
                     onClick={() => setEditingPrompt(editingPrompt === 'seed' ? null : 'seed')}
-                    className="text-xs text-[var(--accent-electric)] hover:underline"
+                    className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--accent-electric)]/20 hover:bg-[var(--accent-electric)]/30 text-[var(--accent-electric)] border border-[var(--accent-electric)]/30 transition-colors"
                   >
-                    {editingPrompt === 'seed' ? 'Close' : 'Edit'}
+                    <svg className="w-3 h-3 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                    {editingPrompt === 'seed' ? 'Cancel' : 'Edit'}
                   </button>
                 </div>
                 {editingPrompt === 'seed' ? (
-                  <textarea
-                    value={seedPrompt.prompt}
-                    onChange={(e) => setSeedPrompt({ ...seedPrompt, prompt: e.target.value })}
-                    className="w-full h-64 p-3 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-default)] text-sm font-mono resize-none focus:outline-none focus:border-[var(--accent-electric)]"
-                  />
+                  <div className="space-y-3">
+                    <textarea
+                      value={editedSeedPrompt}
+                      onChange={(e) => setEditedSeedPrompt(e.target.value)}
+                      className="w-full h-64 p-3 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-default)] text-sm font-mono resize-none focus:outline-none focus:border-[var(--accent-electric)]"
+                    />
+                    {editedSeedPrompt !== seedPrompt?.prompt && (
+                      <button
+                        onClick={async () => {
+                          const result = await savePrompt('seed', { ...seedPrompt, prompt: editedSeedPrompt })
+                          if (result.success) {
+                            setEditingPrompt(null)
+                          }
+                        }}
+                        disabled={isSavingPrompt}
+                        className="w-full py-2.5 px-4 rounded-lg bg-gradient-to-r from-[var(--accent-lime)] to-[var(--accent-electric)] hover:opacity-90 text-black text-sm font-bold transition-opacity disabled:opacity-50"
+                      >
+                        {isSavingPrompt ? 'Saving...' : `Save as v${seedVersion + 1}`}
+                      </button>
+                    )}
+                  </div>
                 ) : (
-                  <p className="text-xs text-[var(--text-muted)] line-clamp-3">{seedPrompt.prompt.substring(0, 200)}...</p>
+                  <p className="text-xs text-[var(--text-muted)] line-clamp-3 bg-[var(--bg-elevated)] p-3 rounded-lg border border-[var(--border-subtle)]">{seedPrompt?.prompt?.substring(0, 200)}...</p>
                 )}
               </div>
 
               {/* Analysis Prompt */}
               <div className="p-4 rounded-xl bg-[var(--bg-tertiary)] border border-[var(--border-subtle)]">
-                <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-[var(--accent-violet)]" />
                     <span className="font-medium text-sm">Keyword Analyzer</span>
                   </div>
+                  <span className={`px-2 py-0.5 rounded-full text-xs font-mono font-bold ${
+                    analysisVersion > 0
+                      ? 'bg-[var(--accent-violet)]/20 text-[var(--accent-violet)]'
+                      : 'bg-[var(--accent-amber)]/20 text-[var(--accent-amber)]'
+                  }`}>
+                    {analysisVersion > 0 ? `v${analysisVersion}` : 'Default'}
+                  </span>
+                </div>
+                {analysisPrompt?.lastUpdated && analysisVersion > 0 && (
+                  <p className="text-xs text-[var(--text-muted)] mb-3">
+                    Last updated: {new Date(analysisPrompt.lastUpdated).toLocaleDateString('en-IN', {
+                      day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
+                    })}
+                  </p>
+                )}
+                <div className="flex items-center gap-2 mb-3">
+                  <button
+                    onClick={() => setShowVersionHistory('analysis')}
+                    disabled={analysisVersion === 0}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                      analysisVersion > 0
+                        ? 'bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] border-[var(--border-subtle)]'
+                        : 'bg-[var(--bg-elevated)]/50 border-[var(--border-subtle)]/50 text-[var(--text-muted)] cursor-not-allowed'
+                    }`}
+                  >
+                    <svg className="w-3 h-3 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    History {analysisVersion > 0 && `(${analysisVersion} versions)`}
+                  </button>
                   <button
                     onClick={() => setEditingPrompt(editingPrompt === 'analysis' ? null : 'analysis')}
-                    className="text-xs text-[var(--accent-electric)] hover:underline"
+                    className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--accent-electric)]/20 hover:bg-[var(--accent-electric)]/30 text-[var(--accent-electric)] border border-[var(--accent-electric)]/30 transition-colors"
                   >
-                    {editingPrompt === 'analysis' ? 'Close' : 'Edit'}
+                    <svg className="w-3 h-3 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                    {editingPrompt === 'analysis' ? 'Cancel' : 'Edit'}
                   </button>
                 </div>
                 {editingPrompt === 'analysis' ? (
-                  <textarea
-                    value={analysisPrompt.prompt}
-                    onChange={(e) => setAnalysisPrompt({ ...analysisPrompt, prompt: e.target.value })}
-                    className="w-full h-64 p-3 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-default)] text-sm font-mono resize-none focus:outline-none focus:border-[var(--accent-electric)]"
-                  />
+                  <div className="space-y-3">
+                    <textarea
+                      value={editedAnalysisPrompt}
+                      onChange={(e) => setEditedAnalysisPrompt(e.target.value)}
+                      className="w-full h-64 p-3 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-default)] text-sm font-mono resize-none focus:outline-none focus:border-[var(--accent-electric)]"
+                    />
+                    {editedAnalysisPrompt !== analysisPrompt?.prompt && (
+                      <button
+                        onClick={async () => {
+                          const result = await savePrompt('analysis', { ...analysisPrompt, prompt: editedAnalysisPrompt })
+                          if (result.success) {
+                            setEditingPrompt(null)
+                          }
+                        }}
+                        disabled={isSavingPrompt}
+                        className="w-full py-2.5 px-4 rounded-lg bg-gradient-to-r from-[var(--accent-violet)] to-[var(--accent-electric)] hover:opacity-90 text-white text-sm font-bold transition-opacity disabled:opacity-50"
+                      >
+                        {isSavingPrompt ? 'Saving...' : `Save as v${analysisVersion + 1}`}
+                      </button>
+                    )}
+                  </div>
                 ) : (
-                  <p className="text-xs text-[var(--text-muted)] line-clamp-3">{analysisPrompt.prompt.substring(0, 200)}...</p>
+                  <p className="text-xs text-[var(--text-muted)] line-clamp-3 bg-[var(--bg-elevated)] p-3 rounded-lg border border-[var(--border-subtle)]">{analysisPrompt?.prompt?.substring(0, 200)}...</p>
                 )}
               </div>
 
-              <button
-                onClick={resetPrompts}
-                className="w-full py-2 text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
-              >
-                Reset to Defaults
-              </button>
+              <div className="pt-4 border-t border-[var(--border-subtle)]">
+                <p className="text-xs text-[var(--text-muted)] text-center">
+                  Prompt versions are used for smart caching. Sessions with the same URL, seeds, and prompt versions will use cached results.
+                </p>
+              </div>
             </div>
           </div>
         </div>
+      )}
+
+      {/* Version History Modal */}
+      {showVersionHistory && (
+        <PromptVersionHistory
+          type={showVersionHistory}
+          currentVersion={showVersionHistory === 'seed' ? seedVersion : analysisVersion}
+          onFetchHistory={fetchVersionHistory}
+          onRollback={rollbackPrompt}
+          onClose={() => setShowVersionHistory(null)}
+        />
       )}
 
       {/* Raw Keywords Modal - Google Ads Format */}
@@ -1532,7 +1934,8 @@ export default function Home() {
                   // Export raw keywords as CSV - detect currency from first keyword
                   const currency = selectedItem.keywordIdeas[0]?.bidCurrency || 'INR'
                   const currencySymbol = currency === 'INR' ? '₹' : '$'
-                  const headers = ['Keyword', 'Avg Monthly Searches', 'Competition', 'Competition Index', `Low Top of Page Bid (${currencySymbol})`, `High Top of Page Bid (${currencySymbol})`, 'In Account', 'Account Names']
+                  const courseUrl = selectedItem.courseInput.courseUrl || ''
+                  const headers = ['Keyword', 'Avg Monthly Searches', 'Competition', 'Competition Index', `Low Top of Page Bid (${currencySymbol})`, `High Top of Page Bid (${currencySymbol})`, 'In Account', 'Account Names', 'Course URL']
                   const rows = selectedItem.keywordIdeas.map(kw => [
                     kw.keyword,
                     kw.avgMonthlySearches,
@@ -1541,7 +1944,8 @@ export default function Home() {
                     kw.lowTopOfPageBidMicros ? (kw.lowTopOfPageBidMicros / 1000000).toFixed(2) : '',
                     kw.highTopOfPageBidMicros ? (kw.highTopOfPageBidMicros / 1000000).toFixed(2) : '',
                     kw.inAccount ? 'Y' : 'N',
-                    kw.inAccountNames?.join('; ') || '-'
+                    kw.inAccountNames?.join('; ') || '-',
+                    courseUrl
                   ])
                   const csvContent = [
                     headers.join(','),
@@ -2723,10 +3127,11 @@ export default function Home() {
                               </button>
                               <button
                                 onClick={() => {
+                                  const courseUrl = selectedItem.courseInput.courseUrl || ''
                                   const csvContent = [
-                                    'Keyword,Search Volume,Competition,Competition Index,Low Bid,High Bid',
+                                    'Keyword,Search Volume,Competition,Competition Index,Low Bid,High Bid,Course URL',
                                     ...selectedItem.keywordIdeas.map(kw =>
-                                      `"${kw.keyword}",${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex},${kw.lowTopOfPageBidMicros || ''},${kw.highTopOfPageBidMicros || ''}`
+                                      `"${kw.keyword}",${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex},${kw.lowTopOfPageBidMicros || ''},${kw.highTopOfPageBidMicros || ''},"${courseUrl}"`
                                     )
                                   ].join('\n')
                                   downloadCSV(csvContent, `raw-keywords-${selectedItem.courseInput.courseName.replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.csv`)
@@ -2790,6 +3195,45 @@ export default function Home() {
           </div>
         )}
       </main>
+
+      {/* Session History Modal */}
+      <SessionHistory
+        isOpen={showSessionHistory}
+        onClose={() => setShowSessionHistory(false)}
+        onLoadSession={loadSessionFromHistory}
+      />
+
+      {/* Smart Cache Alert Modal */}
+      {smartCacheAlert && (
+        <SmartCacheAlert
+          sessionData={smartCacheAlert.sessionData}
+          onUseCached={() => {
+            // Load cached data into the batch item
+            const { item, sessionData } = smartCacheAlert
+            const updatedItem: BatchCourseItem = {
+              ...item,
+              seedKeywords: sessionData.seedKeywords.map(kw => ({ keyword: kw, source: 'ai_generated' as const })),
+              keywordIdeas: sessionData.keywordIdeas,
+              analyzedKeywords: sessionData.analyzedKeywords,
+              status: 'completed',
+              cacheHit: true,
+              dataSource: 'smart_cache',
+              endTime: Date.now(),
+              processingTimeMs: 0
+            }
+            setBatchItems(prev => prev.map(i => i.id === item.id ? updatedItem : i))
+            setSmartCacheAlert(null)
+            setActiveView('results')
+            setSelectedItemId(item.id)
+          }}
+          onForceRefresh={() => {
+            // Clear alert and proceed with normal processing
+            setSmartCacheAlert(null)
+            // The item remains in pending state and will be processed normally
+          }}
+          onDismiss={() => setSmartCacheAlert(null)}
+        />
+      )}
     </div>
     </ToastProvider>
   )

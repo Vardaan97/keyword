@@ -115,9 +115,21 @@ export async function POST(request: NextRequest) {
           }
         }
 
+        // Helper to generate hash for cache keys
+        const hashForCache = (str: string): string => str.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 50)
+
+        // Normalize source for consistent cache keys
+        const normalizedSource = (source === 'auto' || source === 'google') ? 'google_ads' : source
+
         // Generate cache keys
-        const urlHash = pageUrl ? crypto.createHash('md5').update(pageUrl).digest('hex').substring(0, 12) : null
-        const courseHash = courseName ? crypto.createHash('md5').update(courseName.toLowerCase()).digest('hex').substring(0, 12) : null
+        const urlHash = pageUrl ? hashForCache(pageUrl) : ''
+        const courseHash = courseName ? hashForCache(courseName) : ''
+        const seedsHash = seedKeywords.length > 0 ? hashForCache(seedKeywords.sort().join(',')) : ''
+
+        // Cache key definitions
+        const combinedCacheKey = `combined_${seedsHash}_${urlHash}_${geoTarget}_${normalizedSource}`
+        const seedsCacheKey = seedsHash ? `seeds_${seedsHash}_${geoTarget}_${normalizedSource}` : ''
+        const urlCacheKey = urlHash ? `url_${urlHash}_${geoTarget}_${normalizedSource}` : ''
 
         // Check cache first
         sendEvent('progress', {
@@ -126,29 +138,97 @@ export async function POST(request: NextRequest) {
           timestamp: Date.now()
         })
 
+        // Track partial cache data for optimization
+        let cachedSeedsData: UnifiedKeywordData[] | null = null
+        let cachedUrlData: UnifiedKeywordData[] | null = null
+
         const dbStatus = getDatabaseStatus()
         if (!skipCache && dbStatus.hasAnyDatabase) {
-          const cacheKeys = [
-            urlHash ? `url_${urlHash}_${geoTarget}_${source}` : null,
-            courseHash ? `course_${courseHash}_${geoTarget}_${source}` : null,
-          ].filter(Boolean) as string[]
+          // 1. Check combined cache first
+          try {
+            const combinedCached = await getCachedKeywords([combinedCacheKey], geoTarget, normalizedSource)
+            if (combinedCached && combinedCached.length > 0) {
+              const processingTimeMs = Date.now() - startTime
 
-          for (const cacheKey of cacheKeys) {
+              sendEvent('progress', {
+                step: 'cache_hit',
+                message: `Cache hit (combined)! Found ${combinedCached.length} keywords`,
+                timestamp: Date.now()
+              })
+
+              // Send keywords in batches for smoother UI updates
+              const batchSize = 50
+              for (let i = 0; i < combinedCached.length; i += batchSize) {
+                const batch = combinedCached.slice(i, i + batchSize).map(kw => ({
+                  keyword: kw.keyword,
+                  avgMonthlySearches: kw.avgMonthlySearches,
+                  competition: kw.competition,
+                  competitionIndex: kw.competitionIndex,
+                  lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+                  highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+                  bidCurrency: 'INR',
+                  inAccount: kw.inAccount
+                }))
+
+                sendEvent('keywords', {
+                  keywords: batch,
+                  batch: Math.floor(i / batchSize) + 1,
+                  total: Math.ceil(combinedCached.length / batchSize),
+                  progress: Math.min(100, Math.round(((i + batch.length) / combinedCached.length) * 100))
+                })
+
+                await new Promise(resolve => setTimeout(resolve, 10))
+              }
+
+              sendEvent('complete', {
+                success: true,
+                totalKeywords: combinedCached.length,
+                source: 'cache',
+                cacheType: 'combined',
+                cached: true,
+                processingTimeMs
+              })
+
+              controller.close()
+              return
+            }
+          } catch (cacheError) {
+            console.log(`[STREAM] Combined cache check failed:`, cacheError)
+          }
+
+          // 2. Check if we can reconstruct from seeds + URL caches
+          if (seedsCacheKey && urlCacheKey) {
             try {
-              const cached = await getCachedKeywords([cacheKey], geoTarget, source)
-              if (cached && cached.length > 0) {
+              const [seedsCached, urlCached] = await Promise.all([
+                getCachedKeywords([seedsCacheKey], geoTarget, normalizedSource),
+                getCachedKeywords([urlCacheKey], geoTarget, normalizedSource)
+              ])
+
+              if (seedsCached && seedsCached.length > 0 && urlCached && urlCached.length > 0) {
+                // Combine and deduplicate (UNION)
+                const seenKeywords = new Set<string>()
+                const combined: UnifiedKeywordData[] = []
+
+                for (const kw of [...seedsCached, ...urlCached]) {
+                  const normalizedKw = kw.keyword.toLowerCase().trim()
+                  if (!seenKeywords.has(normalizedKw)) {
+                    seenKeywords.add(normalizedKw)
+                    combined.push(kw)
+                  }
+                }
+
                 const processingTimeMs = Date.now() - startTime
 
                 sendEvent('progress', {
                   step: 'cache_hit',
-                  message: `Cache hit! Found ${cached.length} keywords`,
+                  message: `Cache hit (reconstructed)! Found ${combined.length} keywords`,
                   timestamp: Date.now()
                 })
 
-                // Send keywords in batches for smoother UI updates
+                // Send keywords in batches
                 const batchSize = 50
-                for (let i = 0; i < cached.length; i += batchSize) {
-                  const batch = cached.slice(i, i + batchSize).map(kw => ({
+                for (let i = 0; i < combined.length; i += batchSize) {
+                  const batch = combined.slice(i, i + batchSize).map(kw => ({
                     keyword: kw.keyword,
                     avgMonthlySearches: kw.avgMonthlySearches,
                     competition: kw.competition,
@@ -162,18 +242,21 @@ export async function POST(request: NextRequest) {
                   sendEvent('keywords', {
                     keywords: batch,
                     batch: Math.floor(i / batchSize) + 1,
-                    total: Math.ceil(cached.length / batchSize),
-                    progress: Math.min(100, Math.round(((i + batch.length) / cached.length) * 100))
+                    total: Math.ceil(combined.length / batchSize),
+                    progress: Math.min(100, Math.round(((i + batch.length) / combined.length) * 100))
                   })
 
-                  // Small delay between batches for smooth UI
                   await new Promise(resolve => setTimeout(resolve, 10))
                 }
 
+                // Save combined for faster future lookups
+                await setCachedKeywords([combinedCacheKey], geoTarget, normalizedSource, combined, 168)
+
                 sendEvent('complete', {
                   success: true,
-                  totalKeywords: cached.length,
+                  totalKeywords: combined.length,
                   source: 'cache',
+                  cacheType: 'reconstructed',
                   cached: true,
                   processingTimeMs
                 })
@@ -182,8 +265,46 @@ export async function POST(request: NextRequest) {
                 return
               }
             } catch (cacheError) {
-              console.log(`[STREAM] Cache check failed:`, cacheError)
+              console.log(`[STREAM] Separate cache reconstruction failed:`, cacheError)
             }
+          }
+
+          // 3. Check for PARTIAL cache hits
+          if (seedsCacheKey) {
+            try {
+              cachedSeedsData = await getCachedKeywords([seedsCacheKey], geoTarget, normalizedSource)
+              if (cachedSeedsData && cachedSeedsData.length > 0) {
+                console.log(`[STREAM] Found SEEDS cache: ${cachedSeedsData.length} keywords`)
+              }
+            } catch (err) {
+              console.log('[STREAM] Seeds cache check failed:', err)
+            }
+          }
+
+          if (urlCacheKey) {
+            try {
+              cachedUrlData = await getCachedKeywords([urlCacheKey], geoTarget, normalizedSource)
+              if (cachedUrlData && cachedUrlData.length > 0) {
+                console.log(`[STREAM] Found URL cache: ${cachedUrlData.length} keywords`)
+              }
+            } catch (err) {
+              console.log('[STREAM] URL cache check failed:', err)
+            }
+          }
+
+          // Log partial cache status
+          if (cachedSeedsData && cachedSeedsData.length > 0 && !cachedUrlData && pageUrl) {
+            sendEvent('progress', {
+              step: 'partial_cache',
+              message: `Partial cache: seeds cached (${cachedSeedsData.length}), fetching URL keywords...`,
+              timestamp: Date.now()
+            })
+          } else if (cachedUrlData && cachedUrlData.length > 0 && !cachedSeedsData && seedKeywords.length > 0) {
+            sendEvent('progress', {
+              step: 'partial_cache',
+              message: `Partial cache: URL cached (${cachedUrlData.length}), fetching seed keywords...`,
+              timestamp: Date.now()
+            })
           }
         }
 
@@ -216,16 +337,52 @@ export async function POST(request: NextRequest) {
           try {
             const geoTargetConstant = geoTargetMap[geoTarget.toLowerCase()] || geoTargetMap['india']
 
-            keywords = await getKeywordIdeas(activeConfig, {
+            // Convert cached data to KeywordIdea format for partial cache optimization
+            const cachedSeedsKeywords: KeywordIdea[] | undefined = cachedSeedsData && cachedSeedsData.length > 0
+              ? cachedSeedsData.map(kw => ({
+                  keyword: kw.keyword,
+                  avgMonthlySearches: kw.avgMonthlySearches,
+                  competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
+                  competitionIndex: kw.competitionIndex,
+                  lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+                  highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+                  bidCurrency: 'INR',
+                  inAccount: kw.inAccount,
+                  inAccountNames: kw.inAccountNames
+                }))
+              : undefined
+
+            const cachedUrlKeywords: KeywordIdea[] | undefined = cachedUrlData && cachedUrlData.length > 0
+              ? cachedUrlData.map(kw => ({
+                  keyword: kw.keyword,
+                  avgMonthlySearches: kw.avgMonthlySearches,
+                  competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
+                  competitionIndex: kw.competitionIndex,
+                  lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+                  highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+                  bidCurrency: 'INR',
+                  inAccount: kw.inAccount,
+                  inAccountNames: kw.inAccountNames
+                }))
+              : undefined
+
+            const result = await getKeywordIdeas(activeConfig, {
               customerId,
               seedKeywords,
               pageUrl,
               geoTargetConstants: [geoTargetConstant],
               checkAllAccounts,
-              allAccountIds
+              allAccountIds,
+              cachedSeedsKeywords,
+              cachedUrlKeywords
             })
 
+            keywords = result.combined  // Extract combined keywords from result
             actualSource = 'google_ads'
+
+            // Track what was from cache vs fresh
+            const usedCachedSeeds = !!cachedSeedsKeywords
+            const usedCachedUrl = !!cachedUrlKeywords
 
             // Send keywords in batches as they're "received"
             const batchSize = 50
@@ -241,6 +398,67 @@ export async function POST(request: NextRequest) {
 
               // Small delay for smooth UI
               await new Promise(resolve => setTimeout(resolve, 10))
+            }
+
+            // Cache results (only fresh data, not already-cached data)
+            if (keywords.length > 0 && dbStatus.hasAnyDatabase) {
+              sendEvent('progress', {
+                step: 'caching',
+                message: 'Saving to cache...',
+                timestamp: Date.now()
+              })
+
+              try {
+                // Cache seeds keywords (only if fetched fresh)
+                if (result.bySeedsOnly && result.bySeedsOnly.length > 0 && !usedCachedSeeds && seedsCacheKey) {
+                  const seedsData: UnifiedKeywordData[] = result.bySeedsOnly.map(kw => ({
+                    keyword: kw.keyword,
+                    avgMonthlySearches: kw.avgMonthlySearches,
+                    competition: kw.competition,
+                    competitionIndex: kw.competitionIndex,
+                    lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+                    highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+                    inAccount: kw.inAccount
+                  }))
+                  await setCachedKeywords([seedsCacheKey], geoTarget, normalizedSource, seedsData, 168)
+                  console.log(`[STREAM] Cached ${seedsData.length} keywords to SEEDS cache`)
+                }
+
+                // Cache URL keywords (only if fetched fresh)
+                if (result.byUrlOnly && result.byUrlOnly.length > 0 && !usedCachedUrl && urlCacheKey) {
+                  const urlData: UnifiedKeywordData[] = result.byUrlOnly.map(kw => ({
+                    keyword: kw.keyword,
+                    avgMonthlySearches: kw.avgMonthlySearches,
+                    competition: kw.competition,
+                    competitionIndex: kw.competitionIndex,
+                    lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+                    highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+                    inAccount: kw.inAccount
+                  }))
+                  await setCachedKeywords([urlCacheKey], geoTarget, normalizedSource, urlData, 168)
+                  console.log(`[STREAM] Cached ${urlData.length} keywords to URL cache`)
+                }
+
+                // Cache combined results (always for faster exact-match lookups)
+                const combinedData: UnifiedKeywordData[] = keywords.map(kw => ({
+                  keyword: kw.keyword,
+                  avgMonthlySearches: kw.avgMonthlySearches,
+                  competition: kw.competition,
+                  competitionIndex: kw.competitionIndex,
+                  lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+                  highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+                  inAccount: kw.inAccount
+                }))
+                await setCachedKeywords([combinedCacheKey], geoTarget, normalizedSource, combinedData, 168)
+
+                // Also cache with course key if available
+                if (courseHash) {
+                  const courseCacheKey = `course_${courseHash}_${geoTarget}_${normalizedSource}`
+                  await setCachedKeywords([courseCacheKey], geoTarget, normalizedSource, combinedData, 168)
+                }
+              } catch (cacheError) {
+                console.log('[STREAM] Cache save error:', cacheError)
+              }
             }
 
           } catch (googleError) {
@@ -270,42 +488,6 @@ export async function POST(request: NextRequest) {
               controller.close()
               return
             }
-          }
-        }
-
-        // Cache the results
-        if (keywords.length > 0 && dbStatus.hasAnyDatabase) {
-          sendEvent('progress', {
-            step: 'caching',
-            message: 'Saving to cache...',
-            timestamp: Date.now()
-          })
-
-          try {
-            const keywordData: UnifiedKeywordData[] = keywords.map(kw => ({
-              keyword: kw.keyword,
-              avgMonthlySearches: kw.avgMonthlySearches,
-              competition: kw.competition,
-              competitionIndex: kw.competitionIndex,
-              lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
-              highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
-              inAccount: kw.inAccount
-            }))
-
-            // Save to various cache keys
-            await setCachedKeywords(seedKeywords, geoTarget, actualSource, keywordData)
-
-            if (urlHash) {
-              const urlCacheKey = `url_${urlHash}_${geoTarget}_${actualSource}`
-              await setCachedKeywords([urlCacheKey], geoTarget, actualSource, keywordData)
-            }
-
-            if (courseHash) {
-              const courseCacheKey = `course_${courseHash}_${geoTarget}_${actualSource}`
-              await setCachedKeywords([courseCacheKey], geoTarget, actualSource, keywordData)
-            }
-          } catch (cacheError) {
-            console.log('[STREAM] Cache save error:', cacheError)
           }
         }
 

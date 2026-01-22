@@ -31,6 +31,23 @@ const geoToCountryCode: Record<string, CountryCode> = {
 }
 
 /**
+ * Normalize source name for consistent cache keys
+ * 'auto' and 'google' → 'google_ads'
+ * 'keywords_everywhere' stays the same
+ */
+function normalizeSource(source: string): string {
+  if (source === 'auto' || source === 'google') return 'google_ads'
+  return source
+}
+
+/**
+ * Generate hash for cache key (consistent, short)
+ */
+function hashForCache(str: string): string {
+  return str.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 50)
+}
+
+/**
  * Fetch keyword ideas using Keywords Everywhere API
  * Returns real search volume data
  *
@@ -179,10 +196,13 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
   const body: FetchIdeasRequest = await request.json()
   const { seedKeywords, pageUrl, courseName, geoTarget = 'india', source = 'auto', skipCache = false, accountId } = body
 
-  // Create a cache key that includes URL for better cache hits
-  // This allows reusing cached data when processing the same course URL again
-  const urlHash = pageUrl ? pageUrl.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 50) : ''
-  const courseHash = courseName ? courseName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30) : ''
+  // Normalize source for consistent cache keys ('auto'/'google' → 'google_ads')
+  const normalizedSource = normalizeSource(source)
+
+  // Create cache key components
+  const urlHash = pageUrl ? hashForCache(pageUrl) : ''
+  const courseHash = courseName ? hashForCache(courseName) : ''
+  const seedsHash = seedKeywords.length > 0 ? hashForCache(seedKeywords.sort().join(',')) : ''
 
   // Resolve customer ID from accountId or use default
   // Special handling for "ALL" - will check all accounts
@@ -225,158 +245,244 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     }, { status: 400 })
   }
 
-  // Check cache first (unless skipCache is true)
-  // Try multiple cache keys for better hit rate:
-  // 1. URL-based key (best - same URL = same keywords)
-  // 2. Course name-based key
-  // 3. Seeds-based key (original)
+  // ==========================================================================
+  // CACHE CHECK - Check for cached data before making API calls
+  // Uses separate caches for:
+  // 1. Combined cache (seeds + URL) - best match for exact same request
+  // 2. Seeds-only cache - reusable across different URLs
+  // 3. URL-only cache - reusable across different seed sets
+  // TTL: 7 days (168 hours)
+  // ==========================================================================
   const dbStatus = getDatabaseStatus()
+
+  // Cache key definitions (using normalized source for consistency)
+  const combinedCacheKey = `combined_${seedsHash}_${urlHash}_${geoTarget}_${normalizedSource}`
+  const seedsCacheKey = seedsHash ? `seeds_${seedsHash}_${geoTarget}_${normalizedSource}` : ''
+  const urlCacheKey = urlHash ? `url_${urlHash}_${geoTarget}_${normalizedSource}` : ''
+
+  // Track partial cache data for use in API section (defined outside if block)
+  let partialCacheData: {
+    seedsCached: UnifiedKeywordData[] | null
+    urlCached: UnifiedKeywordData[] | null
+  } = { seedsCached: null, urlCached: null }
+
+  console.log('[FETCH-IDEAS] Cache keys:')
+  console.log('[FETCH-IDEAS]   Combined:', combinedCacheKey.slice(0, 60) + '...')
+  console.log('[FETCH-IDEAS]   Seeds:', seedsCacheKey.slice(0, 60) + '...')
+  console.log('[FETCH-IDEAS]   URL:', urlCacheKey.slice(0, 60) + '...')
+
   if (!skipCache && dbStatus.hasAnyDatabase) {
-    // Try URL-based cache first (most specific)
-    const cacheKeys = [
-      urlHash ? `url_${urlHash}_${geoTarget}_${source}` : null,  // URL-based
-      courseHash ? `course_${courseHash}_${geoTarget}_${source}` : null,  // Course name-based
-    ].filter(Boolean) as string[]
-
-    for (const cacheKey of cacheKeys) {
-      try {
-        const cached = await getCachedKeywords([cacheKey], geoTarget, source)
-        if (cached && cached.length > 0) {
-          const processingTimeMs = Date.now() - startTime
-          console.log(`[FETCH-IDEAS] Cache hit (${cacheKey.split('_')[0]}-based)!`, cached.length, 'keywords in', processingTimeMs, 'ms')
-
-          // Convert to KeywordIdea with currency info
-          const keywordIdeas: KeywordIdea[] = cached.map(kw => ({
-            keyword: kw.keyword,
-            avgMonthlySearches: kw.avgMonthlySearches,
-            competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
-            competitionIndex: kw.competitionIndex,
-            lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
-            highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
-            bidCurrency: 'INR',  // Default to INR for cached data (all our accounts are INR)
-            inAccount: kw.inAccount
-          }))
-
-          return NextResponse.json({
-            success: true,
-            data: keywordIdeas,
-            meta: { source: 'cache', cached: true, processingTimeMs, databases: dbStatus, cacheKey: cacheKey.split('_')[0] }
-          })
-        }
-      } catch (cacheError) {
-        console.log(`[FETCH-IDEAS] Cache check (${cacheKey}) failed:`, cacheError)
-      }
-    }
-
-    // Fallback to seed-based cache (exact match)
-    try {
-      const cached = await getCachedKeywords(seedKeywords, geoTarget, source)
-      if (cached && cached.length > 0) {
-        const processingTimeMs = Date.now() - startTime
-        console.log('[FETCH-IDEAS] Cache hit (seeds-based)!', cached.length, 'keywords in', processingTimeMs, 'ms')
-
-        const keywordIdeas: KeywordIdea[] = cached.map(kw => ({
-          keyword: kw.keyword,
-          avgMonthlySearches: kw.avgMonthlySearches,
-          competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
-          competitionIndex: kw.competitionIndex,
-          lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
-          highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
-          bidCurrency: 'INR',
-          inAccount: kw.inAccount
-        }))
-
-        return NextResponse.json({
-          success: true,
-          data: keywordIdeas,
-          meta: { source: 'cache', cached: true, processingTimeMs, databases: dbStatus, cacheKey: 'seeds' }
-        })
-      }
-    } catch (cacheError) {
-      console.log('[FETCH-IDEAS] Seeds cache check failed:', cacheError)
-    }
-
-    // Check for partial seed match (if 3+ seeds match an existing cache entry)
-    // This helps when similar courses have overlapping seed keywords
-    if (seedKeywords.length >= 3) {
-      try {
-        // Try with first 3 seeds sorted (most likely to match across similar courses)
-        const partialSeeds = seedKeywords.slice(0, 3).sort()
-        const partialCacheKey = `partial_${partialSeeds.join(',')}_${geoTarget}_${source}`
-        const partialCached = await getCachedKeywords([partialCacheKey], geoTarget, source)
-
-        if (partialCached && partialCached.length > 0) {
-          const processingTimeMs = Date.now() - startTime
-          console.log('[FETCH-IDEAS] Cache hit (partial-seeds)!', partialCached.length, 'keywords in', processingTimeMs, 'ms')
-
-          const keywordIdeas: KeywordIdea[] = partialCached.map(kw => ({
-            keyword: kw.keyword,
-            avgMonthlySearches: kw.avgMonthlySearches,
-            competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
-            competitionIndex: kw.competitionIndex,
-            lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
-            highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
-            bidCurrency: 'INR',
-            inAccount: kw.inAccount
-          }))
-
-          return NextResponse.json({
-            success: true,
-            data: keywordIdeas,
-            meta: { source: 'cache', cached: true, processingTimeMs, databases: dbStatus, cacheKey: 'partial-seeds' }
-          })
-        }
-      } catch (partialError) {
-        console.log('[FETCH-IDEAS] Partial seeds cache check failed:', partialError)
-      }
-    }
-  }
-
-  // Helper function to cache results (writes to multiple cache keys for better hit rate)
-  const cacheResults = async (keywords: KeywordIdea[], actualSource: string) => {
-    if (!dbStatus.hasAnyDatabase) return
-    try {
-      const keywordData: UnifiedKeywordData[] = keywords.map(kw => ({
+    // Helper function to convert cached data to KeywordIdea[]
+    const convertCachedToKeywordIdeas = (cached: UnifiedKeywordData[]): KeywordIdea[] => {
+      return cached.map(kw => ({
         keyword: kw.keyword,
         avgMonthlySearches: kw.avgMonthlySearches,
-        competition: kw.competition,
+        competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
         competitionIndex: kw.competitionIndex,
         lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
         highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
-        inAccount: kw.inAccount
+        bidCurrency: 'INR',
+        inAccount: kw.inAccount,
+        inAccountNames: kw.inAccountNames
       }))
-
-      // Save to seeds-based cache (7 day TTL)
-      await setCachedKeywords(seedKeywords, geoTarget, actualSource, keywordData, 168)
-
-      // Also save with URL-based key for better cache hits when same URL is processed again
-      if (urlHash) {
-        await setCachedKeywords([`url_${urlHash}_${geoTarget}_${actualSource}`], geoTarget, actualSource, keywordData)
-        console.log(`[FETCH-IDEAS] Saved URL-based cache: url_${urlHash.slice(0, 20)}...`)
-      }
-
-      // Save with course name-based key as well
-      if (courseHash) {
-        await setCachedKeywords([`course_${courseHash}_${geoTarget}_${actualSource}`], geoTarget, actualSource, keywordData)
-        console.log(`[FETCH-IDEAS] Saved course-based cache: course_${courseHash}`)
-      }
-
-      // Save partial seeds cache (first 3 seeds) for fuzzy matching
-      if (seedKeywords.length >= 3) {
-        const partialSeeds = seedKeywords.slice(0, 3).sort()
-        const partialCacheKey = `partial_${partialSeeds.join(',')}_${geoTarget}_${actualSource}`
-        await setCachedKeywords([partialCacheKey], geoTarget, actualSource, keywordData)
-        console.log(`[FETCH-IDEAS] Saved partial-seeds cache: ${partialSeeds.slice(0, 2).join(', ')}...`)
-      }
-
-      // Also save individual keyword volumes for future lookups (7 day TTL)
-      // This allows reusing volume data across different seed keyword searches
-      const volumeSource = actualSource === 'google_ads' ? 'google_ads' : 'keywords_everywhere'
-      const savedCount = await saveKeywordVolumes(keywordData, geoTarget, volumeSource as 'google_ads' | 'keywords_everywhere', 7)
-      console.log(`[FETCH-IDEAS] Saved ${savedCount} keyword volumes to cache`)
-    } catch (err) {
-      console.log('[FETCH-IDEAS] Failed to cache results:', err)
     }
+
+    // 1. Check combined cache first (exact match for same seeds + URL + geo)
+    try {
+      const combinedCached = await getCachedKeywords([combinedCacheKey], geoTarget, normalizedSource)
+      if (combinedCached && combinedCached.length > 0) {
+        const processingTimeMs = Date.now() - startTime
+        console.log(`[FETCH-IDEAS] ✓ CACHE HIT (combined)! ${combinedCached.length} keywords in ${processingTimeMs}ms`)
+        return NextResponse.json({
+          success: true,
+          data: convertCachedToKeywordIdeas(combinedCached),
+          meta: { source: 'cache', cached: true, cacheType: 'combined', processingTimeMs, databases: dbStatus }
+        })
+      }
+    } catch (err) {
+      console.log('[FETCH-IDEAS] Combined cache check failed:', err)
+    }
+
+    // 2. Check if we can reconstruct from separate seeds + URL caches
+    if (seedsCacheKey && urlCacheKey) {
+      try {
+        const [seedsCached, urlCached] = await Promise.all([
+          getCachedKeywords([seedsCacheKey], geoTarget, normalizedSource),
+          getCachedKeywords([urlCacheKey], geoTarget, normalizedSource)
+        ])
+
+        if (seedsCached && seedsCached.length > 0 && urlCached && urlCached.length > 0) {
+          // Combine and deduplicate (UNION)
+          const seenKeywords = new Set<string>()
+          const combined: UnifiedKeywordData[] = []
+
+          for (const kw of [...seedsCached, ...urlCached]) {
+            const normalizedKw = kw.keyword.toLowerCase().trim()
+            if (!seenKeywords.has(normalizedKw)) {
+              seenKeywords.add(normalizedKw)
+              combined.push(kw)
+            }
+          }
+
+          const processingTimeMs = Date.now() - startTime
+          console.log(`[FETCH-IDEAS] ✓ CACHE HIT (seeds+url reconstructed)! ${combined.length} keywords (${seedsCached.length} seeds + ${urlCached.length} url, deduplicated) in ${processingTimeMs}ms`)
+
+          // Save combined result for faster future lookups
+          await setCachedKeywords([combinedCacheKey], geoTarget, normalizedSource, combined, 168)
+
+          return NextResponse.json({
+            success: true,
+            data: convertCachedToKeywordIdeas(combined),
+            meta: { source: 'cache', cached: true, cacheType: 'reconstructed', processingTimeMs, databases: dbStatus }
+          })
+        }
+      } catch (err) {
+        console.log('[FETCH-IDEAS] Separate cache reconstruction failed:', err)
+      }
+    }
+
+    // 3. Check for PARTIAL cache hits - use cached data + fetch only what's missing
+    // This is the key optimization: URL keywords don't change based on seeds,
+    // so we can reuse URL cache and only fetch seed keywords (or vice versa)
+
+    let cachedSeedsData: UnifiedKeywordData[] | null = null
+    let cachedUrlData: UnifiedKeywordData[] | null = null
+
+    // Check seeds cache
+    if (seedsCacheKey) {
+      try {
+        cachedSeedsData = await getCachedKeywords([seedsCacheKey], geoTarget, normalizedSource)
+        if (cachedSeedsData && cachedSeedsData.length > 0) {
+          console.log(`[FETCH-IDEAS] Found SEEDS cache: ${cachedSeedsData.length} keywords`)
+        }
+      } catch (err) {
+        console.log('[FETCH-IDEAS] Seeds cache check failed:', err)
+      }
+    }
+
+    // Check URL cache
+    if (urlCacheKey) {
+      try {
+        cachedUrlData = await getCachedKeywords([urlCacheKey], geoTarget, normalizedSource)
+        if (cachedUrlData && cachedUrlData.length > 0) {
+          console.log(`[FETCH-IDEAS] Found URL cache: ${cachedUrlData.length} keywords`)
+        }
+      } catch (err) {
+        console.log('[FETCH-IDEAS] URL cache check failed:', err)
+      }
+    }
+
+    // If we have seeds cache but no URL provided, return seeds cache
+    if (cachedSeedsData && cachedSeedsData.length > 0 && !pageUrl) {
+      const processingTimeMs = Date.now() - startTime
+      console.log(`[FETCH-IDEAS] ✓ CACHE HIT (seeds only, no URL needed)! ${cachedSeedsData.length} keywords in ${processingTimeMs}ms`)
+      return NextResponse.json({
+        success: true,
+        data: convertCachedToKeywordIdeas(cachedSeedsData),
+        meta: { source: 'cache', cached: true, cacheType: 'seeds', processingTimeMs, databases: dbStatus }
+      })
+    }
+
+    // If we have URL cache but no seeds provided, return URL cache
+    if (cachedUrlData && cachedUrlData.length > 0 && seedKeywords.length === 0) {
+      const processingTimeMs = Date.now() - startTime
+      console.log(`[FETCH-IDEAS] ✓ CACHE HIT (url only, no seeds needed)! ${cachedUrlData.length} keywords in ${processingTimeMs}ms`)
+      return NextResponse.json({
+        success: true,
+        data: convertCachedToKeywordIdeas(cachedUrlData),
+        meta: { source: 'cache', cached: true, cacheType: 'url', processingTimeMs, databases: dbStatus }
+      })
+    }
+
+    // PARTIAL CACHE HIT: If URL cache exists but seeds cache doesn't match,
+    // we can use cached URL keywords and only fetch seed keywords from API
+    // This saves one API call!
+    if (cachedUrlData && cachedUrlData.length > 0 && !cachedSeedsData && seedKeywords.length > 0) {
+      console.log(`[FETCH-IDEAS] ⚡ PARTIAL CACHE HIT: URL cached (${cachedUrlData.length}), will fetch only SEED keywords`)
+      // Store for later use in API section
+      // We'll handle this in the Google Ads API section below
+    }
+
+    // PARTIAL CACHE HIT: If seeds cache exists but URL cache doesn't,
+    // we can use cached seeds keywords and only fetch URL keywords from API
+    if (cachedSeedsData && cachedSeedsData.length > 0 && !cachedUrlData && pageUrl) {
+      console.log(`[FETCH-IDEAS] ⚡ PARTIAL CACHE HIT: Seeds cached (${cachedSeedsData.length}), will fetch only URL keywords`)
+    }
+
+    // Store partial cache data for use in API section (update outer variable)
+    partialCacheData = {
+      seedsCached: cachedSeedsData,
+      urlCached: cachedUrlData
+    }
+
+    console.log('[FETCH-IDEAS] ✗ FULL CACHE MISS - will fetch from API (partial cache may be used)')
+  } else if (skipCache) {
+    console.log('[FETCH-IDEAS] Cache check SKIPPED (skipCache=true)')
+  } else {
+    console.log('[FETCH-IDEAS] Cache check SKIPPED (no database)')
+  }
+
+  // ==========================================================================
+  // CACHE SAVE HELPERS - Save to separate caches for better reuse
+  // ==========================================================================
+
+  // Helper to convert KeywordIdea[] to UnifiedKeywordData[]
+  const toUnifiedData = (keywords: KeywordIdea[]): UnifiedKeywordData[] => {
+    return keywords.map(kw => ({
+      keyword: kw.keyword,
+      avgMonthlySearches: kw.avgMonthlySearches,
+      competition: kw.competition,
+      competitionIndex: kw.competitionIndex,
+      lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+      highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+      inAccount: kw.inAccount,
+      inAccountNames: kw.inAccountNames
+    }))
+  }
+
+  // Save keywords from keywordSeed approach to seeds-specific cache
+  const cacheSeedsKeywords = async (keywords: KeywordIdea[]) => {
+    if (!dbStatus.hasAnyDatabase || !seedsCacheKey) return
+    try {
+      await setCachedKeywords([seedsCacheKey], geoTarget, normalizedSource, toUnifiedData(keywords), 168)
+      console.log(`[FETCH-IDEAS] ✓ Cached ${keywords.length} keywords to SEEDS cache`)
+    } catch (err) {
+      console.log('[FETCH-IDEAS] Failed to cache seeds keywords:', err)
+    }
+  }
+
+  // Save keywords from urlSeed approach to URL-specific cache
+  const cacheUrlKeywords = async (keywords: KeywordIdea[]) => {
+    if (!dbStatus.hasAnyDatabase || !urlCacheKey) return
+    try {
+      await setCachedKeywords([urlCacheKey], geoTarget, normalizedSource, toUnifiedData(keywords), 168)
+      console.log(`[FETCH-IDEAS] ✓ Cached ${keywords.length} keywords to URL cache`)
+    } catch (err) {
+      console.log('[FETCH-IDEAS] Failed to cache URL keywords:', err)
+    }
+  }
+
+  // Save combined results to combined cache
+  const cacheCombinedKeywords = async (keywords: KeywordIdea[]) => {
+    if (!dbStatus.hasAnyDatabase) return
+    try {
+      await setCachedKeywords([combinedCacheKey], geoTarget, normalizedSource, toUnifiedData(keywords), 168)
+      console.log(`[FETCH-IDEAS] ✓ Cached ${keywords.length} keywords to COMBINED cache`)
+
+      // Also save with course name key if available
+      if (courseHash) {
+        const courseCacheKey = `course_${courseHash}_${geoTarget}_${normalizedSource}`
+        await setCachedKeywords([courseCacheKey], geoTarget, normalizedSource, toUnifiedData(keywords), 168)
+        console.log(`[FETCH-IDEAS] ✓ Cached to course cache: ${courseHash.slice(0, 20)}...`)
+      }
+    } catch (err) {
+      console.log('[FETCH-IDEAS] Failed to cache combined keywords:', err)
+    }
+  }
+
+  // Legacy cacheResults function for Keywords Everywhere fallback
+  const cacheResults = async (keywords: KeywordIdea[], _actualSource: string) => {
+    await cacheCombinedKeywords(keywords)
   }
 
   // If source is explicitly keywords_everywhere, use that directly
@@ -446,24 +552,117 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     console.log('[FETCH-IDEAS] Using geo target constant:', geoTargetConstant)
 
     console.log('[FETCH-IDEAS] Calling Google Ads Keyword Planner API...')
-    const keywordIdeas = await getKeywordIdeas(config, {
+    console.log('[FETCH-IDEAS] Using UNION approach: keywordSeed + urlSeed (if URL provided)')
+
+    // Convert cached data to KeywordIdea format for passing to getKeywordIdeas
+    // This enables partial cache optimization - reuse cached data, only fetch missing
+    const cachedSeedsKeywords: KeywordIdea[] | undefined = partialCacheData.seedsCached && partialCacheData.seedsCached.length > 0
+      ? partialCacheData.seedsCached.map(kw => ({
+          keyword: kw.keyword,
+          avgMonthlySearches: kw.avgMonthlySearches,
+          competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
+          competitionIndex: kw.competitionIndex,
+          lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+          highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+          bidCurrency: 'INR',
+          inAccount: kw.inAccount,
+          inAccountNames: kw.inAccountNames
+        }))
+      : undefined
+
+    const cachedUrlKeywords: KeywordIdea[] | undefined = partialCacheData.urlCached && partialCacheData.urlCached.length > 0
+      ? partialCacheData.urlCached.map(kw => ({
+          keyword: kw.keyword,
+          avgMonthlySearches: kw.avgMonthlySearches,
+          competition: kw.competition as 'LOW' | 'MEDIUM' | 'HIGH' | 'UNSPECIFIED',
+          competitionIndex: kw.competitionIndex,
+          lowTopOfPageBidMicros: kw.lowTopOfPageBidMicros,
+          highTopOfPageBidMicros: kw.highTopOfPageBidMicros,
+          bidCurrency: 'INR',
+          inAccount: kw.inAccount,
+          inAccountNames: kw.inAccountNames
+        }))
+      : undefined
+
+    if (cachedSeedsKeywords) {
+      console.log(`[FETCH-IDEAS] ⚡ PARTIAL CACHE: Passing ${cachedSeedsKeywords.length} cached SEEDS keywords (skipping keywordSeed API call)`)
+    }
+    if (cachedUrlKeywords) {
+      console.log(`[FETCH-IDEAS] ⚡ PARTIAL CACHE: Passing ${cachedUrlKeywords.length} cached URL keywords (skipping urlSeed API call)`)
+    }
+
+    const result = await getKeywordIdeas(config, {
       customerId,
       seedKeywords,
+      pageUrl,
       geoTargetConstants: [geoTargetConstant],
       checkAllAccounts,
-      allAccountIds
+      allAccountIds,
+      cachedSeedsKeywords,
+      cachedUrlKeywords
     })
 
     const processingTimeMs = Date.now() - startTime
-    console.log('[FETCH-IDEAS] Google Ads returned', keywordIdeas.length, 'keywords in', processingTimeMs, 'ms')
+    console.log('[FETCH-IDEAS] Google Ads returned', result.combined.length, 'combined keywords in', processingTimeMs, 'ms')
 
-    // Cache the results
-    await cacheResults(keywordIdeas, 'google_ads')
+    // ==========================================================================
+    // CACHE RESULTS SEPARATELY for better reuse
+    // - Seeds cache: can be reused when same seeds are used with different URL
+    // - URL cache: can be reused when same URL is used with different seeds
+    // - Combined cache: fastest lookup for exact same request
+    // NOTE: Don't re-cache data that was already from cache (partial cache optimization)
+    // ==========================================================================
+
+    // Track what was used from cache vs fetched fresh
+    const usedCachedSeeds = !!cachedSeedsKeywords
+    const usedCachedUrl = !!cachedUrlKeywords
+
+    // Cache seeds-derived keywords separately (only if we fetched them fresh)
+    if (result.bySeedsOnly && result.bySeedsOnly.length > 0 && !usedCachedSeeds) {
+      await cacheSeedsKeywords(result.bySeedsOnly)
+    } else if (usedCachedSeeds) {
+      console.log('[FETCH-IDEAS] ⚡ SKIP caching seeds (already from cache)')
+    }
+
+    // Cache URL-derived keywords separately (only if we fetched them fresh)
+    if (result.byUrlOnly && result.byUrlOnly.length > 0 && !usedCachedUrl) {
+      await cacheUrlKeywords(result.byUrlOnly)
+    } else if (usedCachedUrl) {
+      console.log('[FETCH-IDEAS] ⚡ SKIP caching URL (already from cache)')
+    }
+
+    // Cache combined results (always cache for faster exact-match lookups)
+    await cacheCombinedKeywords(result.combined)
+
+    console.log('[FETCH-IDEAS] ✓ Cached to separate caches (seeds, url, combined)')
+
+    // Determine the actual source description
+    let sourceDescription = 'google_ads'
+    if (usedCachedSeeds && usedCachedUrl) {
+      sourceDescription = 'cache (full)'
+    } else if (usedCachedSeeds) {
+      sourceDescription = 'google_ads+cache (url fetched, seeds cached)'
+    } else if (usedCachedUrl) {
+      sourceDescription = 'google_ads+cache (seeds fetched, url cached)'
+    }
 
     return NextResponse.json({
       success: true,
-      data: keywordIdeas,
-      meta: { source: 'google_ads', processingTimeMs, accountName, customerId }
+      data: result.combined,
+      meta: {
+        source: 'google_ads',
+        sourceDetail: sourceDescription,
+        processingTimeMs,
+        accountName,
+        customerId,
+        keywordsBySource: {
+          seeds: result.bySeedsOnly?.length || 0,
+          url: result.byUrlOnly?.length || 0,
+          combined: result.combined.length,
+          seedsFromCache: usedCachedSeeds,
+          urlFromCache: usedCachedUrl
+        }
+      }
     })
 
   } catch (googleError) {

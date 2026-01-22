@@ -168,7 +168,7 @@ export interface BatchCourseItem {
   startTime?: number
   endTime?: number
   processingTimeMs?: number
-  dataSource?: 'google_ads' | 'keywords_everywhere' | 'cache'
+  dataSource?: 'google_ads' | 'keywords_everywhere' | 'cache' | 'smart_cache'
   cacheHit?: boolean
   progress?: ProcessingProgress // Detailed step-by-step progress
   analysisProgress?: {

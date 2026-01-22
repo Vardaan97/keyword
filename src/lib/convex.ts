@@ -188,3 +188,389 @@ export async function setCachedKeywordsConvex(
     console.error('[CONVEX] Error caching keywords:', error);
   }
 }
+
+// ============================================
+// Google Ads Reports Caching Functions
+// ============================================
+
+import { api } from "../../convex/_generated/api";
+
+/**
+ * Get cached campaign performance from Convex
+ */
+export async function getCachedCampaignPerformance(
+  accountId: string,
+  dateRange: string
+): Promise<{
+  campaigns: Array<{
+    campaignId: string;
+    campaignName: string;
+    status: string;
+    channelType: string;
+    biddingStrategy: string;
+    impressions: number;
+    clicks: number;
+    ctr: number;
+    averageCpc: number;
+    costMicros: number;
+    conversions: number;
+    conversionsValue: number;
+    costPerConversion: number;
+  }>;
+  totals: {
+    impressions: number;
+    clicks: number;
+    costMicros: number;
+    conversions: number;
+    conversionsValue: number;
+    ctr: number;
+    averageCpc: number;
+    costPerConversion: number;
+  };
+  fetchedAt: number;
+} | null> {
+  const client = getConvexClient();
+  if (!client) {
+    return null;
+  }
+
+  try {
+    const result = await client.query(api.gadsReports.getCampaignPerformance, {
+      accountId,
+      dateRange,
+    });
+    return result;
+  } catch (error) {
+    console.error('[CONVEX] Error getting cached campaign performance:', error);
+    return null;
+  }
+}
+
+/**
+ * Set cached campaign performance in Convex
+ */
+export async function setCachedCampaignPerformance(
+  accountId: string,
+  dateRange: string,
+  campaigns: Array<{
+    campaignId: string;
+    campaignName: string;
+    status: string;
+    channelType: string;
+    biddingStrategy: string;
+    impressions: number;
+    clicks: number;
+    ctr: number;
+    averageCpc: number;
+    costMicros: number;
+    conversions: number;
+    conversionsValue: number;
+    costPerConversion: number;
+  }>,
+  totals: {
+    impressions: number;
+    clicks: number;
+    costMicros: number;
+    conversions: number;
+    conversionsValue: number;
+    ctr: number;
+    averageCpc: number;
+    costPerConversion: number;
+  }
+): Promise<void> {
+  const client = getConvexClient();
+  if (!client) {
+    return;
+  }
+
+  try {
+    await client.mutation(api.gadsReports.setCampaignPerformance, {
+      accountId,
+      dateRange,
+      campaigns,
+      totals,
+    });
+    console.log('[CONVEX] Cached campaign performance for:', accountId, dateRange);
+  } catch (error) {
+    console.error('[CONVEX] Error caching campaign performance:', error);
+  }
+}
+
+/**
+ * Get cached recommendations from Convex
+ */
+export async function getCachedRecommendations(
+  accountId: string
+): Promise<{
+  recommendations: Array<{
+    resourceName: string;
+    type: string;
+    category: string;
+    impact: {
+      baseImpressions: number;
+      potentialImpressions: number;
+      baseClicks: number;
+      potentialClicks: number;
+      baseConversions: number;
+      potentialConversions: number;
+    };
+    campaignBudget?: {
+      currentBudgetMicros: number;
+      recommendedBudgetMicros: number;
+    };
+    keyword?: {
+      keyword: string;
+      matchType: string;
+    };
+    description?: string;
+  }>;
+  summary: {
+    total: number;
+    byCategory: Record<string, number>;
+    potentialClicks: number;
+    potentialConversions: number;
+  };
+  fetchedAt: number;
+} | null> {
+  const client = getConvexClient();
+  if (!client) {
+    return null;
+  }
+
+  try {
+    const result = await client.query(api.gadsReports.getRecommendations, {
+      accountId,
+    });
+    return result;
+  } catch (error) {
+    console.error('[CONVEX] Error getting cached recommendations:', error);
+    return null;
+  }
+}
+
+/**
+ * Set cached recommendations in Convex
+ */
+export async function setCachedRecommendations(
+  accountId: string,
+  recommendations: Array<{
+    resourceName: string;
+    type: string;
+    category: string;
+    impact: {
+      baseImpressions: number;
+      potentialImpressions: number;
+      baseClicks: number;
+      potentialClicks: number;
+      baseConversions: number;
+      potentialConversions: number;
+    };
+    campaignBudget?: {
+      currentBudgetMicros: number;
+      recommendedBudgetMicros: number;
+    };
+    keyword?: {
+      keyword: string;
+      matchType: string;
+    };
+    description?: string;
+  }>,
+  summary: {
+    total: number;
+    byCategory: Record<string, number>;
+    potentialClicks: number;
+    potentialConversions: number;
+  }
+): Promise<void> {
+  const client = getConvexClient();
+  if (!client) {
+    return;
+  }
+
+  try {
+    await client.mutation(api.gadsReports.setRecommendations, {
+      accountId,
+      recommendations,
+      summary,
+    });
+    console.log('[CONVEX] Cached recommendations for:', accountId);
+  } catch (error) {
+    console.error('[CONVEX] Error caching recommendations:', error);
+  }
+}
+
+/**
+ * Get cached optimization score from Convex
+ */
+export async function getCachedOptimizationScore(
+  accountId: string
+): Promise<{
+  score: number;
+  upliftPotential: number;
+  recommendationCount: number;
+  fetchedAt: number;
+} | null> {
+  const client = getConvexClient();
+  if (!client) {
+    return null;
+  }
+
+  try {
+    const result = await client.query(api.gadsReports.getOptimizationScore, {
+      accountId,
+    });
+    return result;
+  } catch (error) {
+    console.error('[CONVEX] Error getting cached optimization score:', error);
+    return null;
+  }
+}
+
+/**
+ * Set cached optimization score in Convex
+ */
+export async function setCachedOptimizationScore(
+  accountId: string,
+  score: number,
+  upliftPotential: number,
+  recommendationCount: number
+): Promise<void> {
+  const client = getConvexClient();
+  if (!client) {
+    return;
+  }
+
+  try {
+    await client.mutation(api.gadsReports.setOptimizationScore, {
+      accountId,
+      score,
+      upliftPotential,
+      recommendationCount,
+    });
+    console.log('[CONVEX] Cached optimization score for:', accountId);
+  } catch (error) {
+    console.error('[CONVEX] Error caching optimization score:', error);
+  }
+}
+
+/**
+ * Get cached account summary from Convex
+ */
+export async function getCachedAccountSummary(
+  accountId: string,
+  dateRange: string
+): Promise<{
+  accountName: string;
+  currencyCode: string;
+  totalCampaigns: number;
+  enabledCampaigns: number;
+  metrics: {
+    impressions: number;
+    clicks: number;
+    costMicros: number;
+    conversions: number;
+    conversionsValue: number;
+    ctr: number;
+    averageCpc: number;
+  };
+  fetchedAt: number;
+} | null> {
+  const client = getConvexClient();
+  if (!client) {
+    return null;
+  }
+
+  try {
+    const result = await client.query(api.gadsReports.getAccountSummary, {
+      accountId,
+      dateRange,
+    });
+    return result;
+  } catch (error) {
+    console.error('[CONVEX] Error getting cached account summary:', error);
+    return null;
+  }
+}
+
+/**
+ * Set cached account summary in Convex
+ */
+export async function setCachedAccountSummary(
+  accountId: string,
+  dateRange: string,
+  accountName: string,
+  currencyCode: string,
+  totalCampaigns: number,
+  enabledCampaigns: number,
+  metrics: {
+    impressions: number;
+    clicks: number;
+    costMicros: number;
+    conversions: number;
+    conversionsValue: number;
+    ctr: number;
+    averageCpc: number;
+  }
+): Promise<void> {
+  const client = getConvexClient();
+  if (!client) {
+    return;
+  }
+
+  try {
+    await client.mutation(api.gadsReports.setAccountSummary, {
+      accountId,
+      dateRange,
+      accountName,
+      currencyCode,
+      totalCampaigns,
+      enabledCampaigns,
+      metrics,
+    });
+    console.log('[CONVEX] Cached account summary for:', accountId, dateRange);
+  } catch (error) {
+    console.error('[CONVEX] Error caching account summary:', error);
+  }
+}
+
+/**
+ * Get cache statistics
+ */
+export async function getGadsCacheStats(): Promise<{
+  campaignPerformance: { total: number; active: number; expired: number };
+  recommendations: { total: number; active: number; expired: number };
+  optimizationScore: { total: number; active: number; expired: number };
+  accountSummary: { total: number; active: number; expired: number };
+} | null> {
+  const client = getConvexClient();
+  if (!client) {
+    return null;
+  }
+
+  try {
+    const result = await client.query(api.gadsReports.getCacheStats, {});
+    return result;
+  } catch (error) {
+    console.error('[CONVEX] Error getting cache stats:', error);
+    return null;
+  }
+}
+
+/**
+ * Clear expired cache entries
+ */
+export async function clearExpiredGadsCaches(): Promise<{ deletedCount: number } | null> {
+  const client = getConvexClient();
+  if (!client) {
+    return null;
+  }
+
+  try {
+    const result = await client.mutation(api.gadsReports.clearExpiredCaches, {});
+    console.log('[CONVEX] Cleared expired caches:', result.deletedCount);
+    return result;
+  } catch (error) {
+    console.error('[CONVEX] Error clearing expired caches:', error);
+    return null;
+  }
+}

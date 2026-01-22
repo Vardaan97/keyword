@@ -498,6 +498,9 @@ interface KeywordPlannerRequest {
   language?: string
   checkAllAccounts?: boolean  // If true, check "in account" against all accounts
   allAccountIds?: string[]    // List of all account IDs to check against
+  // Optional cached keywords to skip API calls (for partial cache optimization)
+  cachedSeedsKeywords?: KeywordIdea[]  // If provided, skip keywordSeed API call
+  cachedUrlKeywords?: KeywordIdea[]    // If provided, skip urlSeed API call
 }
 
 // NOTE: Old getAccountKeywords() function REMOVED
@@ -779,10 +782,17 @@ function parseKeywordIdeasResponse(
   })
 }
 
+// Result type with separate tracking for caching
+export interface KeywordIdeasResult {
+  combined: KeywordIdea[]          // Combined UNION of all keywords
+  bySeedsOnly?: KeywordIdea[]      // Keywords from keywordSeed approach only
+  byUrlOnly?: KeywordIdea[]        // Keywords from urlSeed approach only
+}
+
 export async function getKeywordIdeas(
   config: GoogleAdsConfig,
   request: KeywordPlannerRequest
-): Promise<KeywordIdea[]> {
+): Promise<KeywordIdeasResult> {
   console.log('[GOOGLE-ADS] Starting keyword ideas request')
   console.log('[GOOGLE-ADS] API Version:', GOOGLE_ADS_API_VERSION)
   console.log('[GOOGLE-ADS] Seeds:', request.seedKeywords)
@@ -810,7 +820,14 @@ export async function getKeywordIdeas(
   const customerId = request.customerId.replace(/-/g, '')
 
   // Build the base request body
-  // Note: Google Ads API only allows ONE seed type at a time (keywordSeed OR urlSeed)
+  // Note: Google Ads API allows ONE seed type: keywordSeed, urlSeed, or keywordAndUrlSeed
+  //
+  // IMPORTANT: keywordAndUrlSeed returns an INTERSECTION (keywords relevant to BOTH seeds AND URL)
+  // which gives FEWER results than the Google Keyword Planner UI.
+  //
+  // To match Google KP UI behavior, we now make SEPARATE requests with keywordSeed and urlSeed,
+  // then combine results (UNION approach) for more comprehensive keyword coverage.
+  //
   // pageSize controls the max results per page (up to 1000)
   const baseRequestBody: Record<string, unknown> = {
     geoTargetConstants: request.geoTargetConstants || ['geoTargetConstants/2356'], // India
@@ -823,77 +840,187 @@ export async function getKeywordIdeas(
     }
   }
 
-  // Only use keywordSeed - Google Ads API doesn't allow both seeds at once
-  if (request.seedKeywords && request.seedKeywords.length > 0) {
-    baseRequestBody.keywordSeed = {
-      keywords: request.seedKeywords
-    }
-    console.log('[GOOGLE-ADS] Using keywordSeed with', request.seedKeywords.length, 'keywords:', request.seedKeywords.join(', '))
-  } else if (request.pageUrl) {
-    // Fallback to urlSeed only if no keywords provided
-    baseRequestBody.urlSeed = {
-      url: request.pageUrl
-    }
-    console.log('[GOOGLE-ADS] Using urlSeed:', request.pageUrl)
+  // Determine which seed approaches to use
+  // When BOTH URL and keywords are provided, we make separate requests and combine (UNION)
+  // This matches Google Keyword Planner UI behavior and returns more keywords
+  //
+  // PARTIAL CACHE OPTIMIZATION:
+  // If cachedSeedsKeywords is provided, skip keywordSeed API call
+  // If cachedUrlKeywords is provided, skip urlSeed API call
+  // This saves API calls when partial cache hits occur
+  const seedApproaches: { type: string; body: Record<string, unknown> }[] = []
+
+  // Check if we have cached seeds keywords - if so, skip keywordSeed API call
+  const hasCachedSeeds = request.cachedSeedsKeywords && request.cachedSeedsKeywords.length > 0
+  if (request.seedKeywords?.length > 0 && !hasCachedSeeds) {
+    seedApproaches.push({
+      type: 'keywordSeed',
+      body: { ...baseRequestBody, keywordSeed: { keywords: request.seedKeywords } }
+    })
+    console.log('[GOOGLE-ADS] Will fetch with keywordSeed:', request.seedKeywords.length, 'keywords')
+  } else if (hasCachedSeeds) {
+    console.log(`[GOOGLE-ADS] ⚡ SKIP keywordSeed API call - using ${request.cachedSeedsKeywords!.length} cached keywords`)
   }
 
+  // Check if we have cached URL keywords - if so, skip urlSeed API call
+  const hasCachedUrl = request.cachedUrlKeywords && request.cachedUrlKeywords.length > 0
+  if (request.pageUrl && !hasCachedUrl) {
+    seedApproaches.push({
+      type: 'urlSeed',
+      body: { ...baseRequestBody, urlSeed: { url: request.pageUrl } }
+    })
+    console.log('[GOOGLE-ADS] Will fetch with urlSeed:', request.pageUrl)
+  } else if (hasCachedUrl) {
+    console.log(`[GOOGLE-ADS] ⚡ SKIP urlSeed API call - using ${request.cachedUrlKeywords!.length} cached keywords`)
+  }
+
+  // If no API calls needed (both cached) and no seeds/URL provided, return empty or cached
+  if (seedApproaches.length === 0) {
+    // If we have cached data, we'll use it below
+    if (!hasCachedSeeds && !hasCachedUrl) {
+      console.error('[GOOGLE-ADS] No seed keywords or URL provided')
+      return { combined: [], bySeedsOnly: undefined, byUrlOnly: undefined }
+    }
+    console.log('[GOOGLE-ADS] All data cached - no API calls needed')
+  }
+
+  console.log(`[GOOGLE-ADS] Using ${seedApproaches.length} seed approach(es): ${seedApproaches.length > 0 ? seedApproaches.map(s => s.type).join(' + ') : 'NONE (all cached)'}`)
+
   // ============================================================================
-  // PAGINATION LOOP - Fetch ALL pages of keyword ideas
+  // PAGINATION LOOP - Fetch ALL pages of keyword ideas for EACH seed approach
+  // Then combine and deduplicate results (UNION approach)
+  // Also track separate results for caching
   // ============================================================================
-  const MAX_PAGES = 10  // Safety limit: 10 pages = 10,000 keywords max
+  const MAX_PAGES_PER_APPROACH = 10  // Safety limit: 10 pages = 10,000 keywords per approach
   const allKeywordIdeas: KeywordIdea[] = []
-  let pageToken: string | undefined = undefined
-  let pageCount = 0
+  const seenKeywords = new Set<string>()  // Track seen keywords for deduplication
 
-  console.log('[GOOGLE-ADS] Starting pagination - fetching ALL keyword ideas...')
+  // Separate tracking for caching purposes
+  const keywordsBySeedsOnly: KeywordIdea[] = []
+  const keywordsByUrlOnly: KeywordIdea[] = []
 
-  do {
-    // Build request body for this page
-    const requestBody = { ...baseRequestBody }
-    if (pageToken) {
-      requestBody.pageToken = pageToken
+  // Pre-populate with cached keywords (PARTIAL CACHE OPTIMIZATION)
+  if (hasCachedSeeds && request.cachedSeedsKeywords) {
+    console.log(`[GOOGLE-ADS] Adding ${request.cachedSeedsKeywords.length} cached SEEDS keywords`)
+    keywordsBySeedsOnly.push(...request.cachedSeedsKeywords)
+    for (const kw of request.cachedSeedsKeywords) {
+      const normalizedKw = kw.keyword.toLowerCase().trim()
+      if (!seenKeywords.has(normalizedKw)) {
+        seenKeywords.add(normalizedKw)
+        allKeywordIdeas.push(kw)
+      }
     }
-
-    // Rate limit before each API call
-    const rateLimitResult = await rateLimitedDelay(customerId)
-    if (!rateLimitResult.allowed) {
-      console.log(`[GOOGLE-ADS] Rate limit hit after ${pageCount} pages, returning partial results`)
-      break
-    }
-
-    // Fetch page with retry wrapper
-    const data = await withRetry(
-      async () => fetchKeywordIdeasPage(config, customerId, requestBody),
-      `getKeywordIdeas-page${pageCount + 1}`
-    )
-
-    // Parse this page's keywords
-    const pageKeywords = parseKeywordIdeasResponse(data.results || [], bidCurrency)
-    allKeywordIdeas.push(...pageKeywords)
-
-    // Get next page token
-    pageToken = data.nextPageToken
-    pageCount++
-
-    console.log(`[GOOGLE-ADS] Fetched page ${pageCount}: ${pageKeywords.length} keywords (total: ${allKeywordIdeas.length})`)
-
-    // Log sample from first page
-    if (pageCount === 1 && data.results && data.results.length > 0) {
-      console.log('[GOOGLE-ADS] Sample result structure (first keyword):', JSON.stringify(data.results[0], null, 2))
-    }
-
-  } while (pageToken && pageCount < MAX_PAGES)
-
-  console.log(`[GOOGLE-ADS] Pagination complete: ${allKeywordIdeas.length} keywords fetched across ${pageCount} page(s)`)
-
-  if (pageToken) {
-    console.log('[GOOGLE-ADS] WARNING: More pages available but hit MAX_PAGES limit')
   }
 
-  // Filter out zero-volume keywords which are less useful
-  const filteredIdeas = allKeywordIdeas.filter(kw => kw.avgMonthlySearches > 0)
+  if (hasCachedUrl && request.cachedUrlKeywords) {
+    console.log(`[GOOGLE-ADS] Adding ${request.cachedUrlKeywords.length} cached URL keywords`)
+    keywordsByUrlOnly.push(...request.cachedUrlKeywords)
+    for (const kw of request.cachedUrlKeywords) {
+      const normalizedKw = kw.keyword.toLowerCase().trim()
+      if (!seenKeywords.has(normalizedKw)) {
+        seenKeywords.add(normalizedKw)
+        allKeywordIdeas.push(kw)
+      }
+    }
+  }
 
-  console.log('[GOOGLE-ADS] Keywords with volume:', filteredIdeas.length)
+  console.log('[GOOGLE-ADS] Starting pagination - fetching ALL keyword ideas with UNION approach...')
+  console.log(`[GOOGLE-ADS] Pre-populated: ${allKeywordIdeas.length} cached keywords (seeds: ${hasCachedSeeds ? request.cachedSeedsKeywords?.length : 0}, url: ${hasCachedUrl ? request.cachedUrlKeywords?.length : 0})`)
+
+  // Process each seed approach
+  for (const approach of seedApproaches) {
+    console.log(`[GOOGLE-ADS] --- Fetching with ${approach.type} ---`)
+    let pageToken: string | undefined = undefined
+    let pageCount = 0
+    let approachKeywordCount = 0
+    const approachKeywords: KeywordIdea[] = []  // Track keywords for this approach
+
+    do {
+      // Build request body for this page
+      const requestBody = { ...approach.body }
+      if (pageToken) {
+        requestBody.pageToken = pageToken
+      }
+
+      // Rate limit before each API call
+      const rateLimitResult = await rateLimitedDelay(customerId)
+      if (!rateLimitResult.allowed) {
+        console.log(`[GOOGLE-ADS] Rate limit hit for ${approach.type} after ${pageCount} pages, continuing with next approach`)
+        break
+      }
+
+      // Fetch page with retry wrapper
+      const data = await withRetry(
+        async () => fetchKeywordIdeasPage(config, customerId, requestBody),
+        `getKeywordIdeas-${approach.type}-page${pageCount + 1}`
+      )
+
+      // Parse this page's keywords
+      const pageKeywords = parseKeywordIdeasResponse(data.results || [], bidCurrency)
+      approachKeywords.push(...pageKeywords)  // Track all keywords from this approach
+
+      // Add only new keywords (deduplicate across approaches)
+      let newKeywordsThisPage = 0
+      for (const kw of pageKeywords) {
+        const normalizedKw = kw.keyword.toLowerCase().trim()
+        if (!seenKeywords.has(normalizedKw)) {
+          seenKeywords.add(normalizedKw)
+          allKeywordIdeas.push(kw)
+          newKeywordsThisPage++
+        }
+      }
+      approachKeywordCount += pageKeywords.length
+
+      // Get next page token
+      pageToken = data.nextPageToken
+      pageCount++
+
+      console.log(`[GOOGLE-ADS] ${approach.type} page ${pageCount}: ${pageKeywords.length} keywords (${newKeywordsThisPage} new, total unique: ${allKeywordIdeas.length})`)
+
+      // Log detailed pagination info for first page of first approach
+      if (pageCount === 1 && approach.type === seedApproaches[0].type) {
+        console.log('[GOOGLE-ADS] === FIRST PAGE RESPONSE DETAILS ===')
+        console.log('[GOOGLE-ADS] Results count:', data.results?.length || 0)
+        console.log('[GOOGLE-ADS] Has nextPageToken:', !!data.nextPageToken)
+        console.log('[GOOGLE-ADS] Response keys:', Object.keys(data))
+        // Check for totalSize (cast to any to check for undocumented fields)
+        const dataAny = data as Record<string, unknown>
+        if (dataAny.totalSize) console.log('[GOOGLE-ADS] totalSize:', dataAny.totalSize)
+        if (data.nextPageToken) console.log('[GOOGLE-ADS] nextPageToken (first 50 chars):', data.nextPageToken.substring(0, 50))
+        if (data.results && data.results.length > 0) {
+          console.log('[GOOGLE-ADS] Sample result:', JSON.stringify(data.results[0], null, 2))
+        }
+        console.log('[GOOGLE-ADS] === END FIRST PAGE DETAILS ===')
+      }
+
+    } while (pageToken && pageCount < MAX_PAGES_PER_APPROACH)
+
+    // Store approach-specific keywords for caching
+    if (approach.type === 'keywordSeed') {
+      keywordsBySeedsOnly.push(...approachKeywords)
+    } else if (approach.type === 'urlSeed') {
+      keywordsByUrlOnly.push(...approachKeywords)
+    }
+
+    console.log(`[GOOGLE-ADS] ${approach.type} complete: ${approachKeywordCount} total, ${pageCount} page(s)`)
+    if (pageToken) {
+      console.log(`[GOOGLE-ADS] WARNING: ${approach.type} has more pages but hit MAX_PAGES limit`)
+    }
+  }
+
+  console.log(`[GOOGLE-ADS] UNION complete: ${allKeywordIdeas.length} unique keywords from ${seedApproaches.length} approach(es)`)
+  console.log(`[GOOGLE-ADS]   - keywordSeed: ${keywordsBySeedsOnly.length} keywords`)
+  console.log(`[GOOGLE-ADS]   - urlSeed: ${keywordsByUrlOnly.length} keywords`)
+
+  // NOTE: Previously we filtered out zero-volume keywords here, but this caused
+  // a mismatch with Google Keyword Planner counts. Now we return ALL keywords
+  // to match Google KP exactly. Zero-volume keywords can still be valuable for
+  // long-tail targeting and can be filtered in the UI if needed.
+  const filteredIdeas = allKeywordIdeas
+
+  const zeroVolumeCount = allKeywordIdeas.filter(kw => kw.avgMonthlySearches === 0).length
+  const withVolumeCount = allKeywordIdeas.length - zeroVolumeCount
+  console.log(`[GOOGLE-ADS] Total keywords: ${allKeywordIdeas.length} (${withVolumeCount} with volume, ${zeroVolumeCount} zero-volume)`)
 
   if (filteredIdeas.length > 0) {
     console.log('[GOOGLE-ADS] Top keyword:', filteredIdeas[0].keyword, '- volume:', filteredIdeas[0].avgMonthlySearches)
@@ -947,7 +1074,12 @@ export async function getKeywordIdeas(
     console.log('[GOOGLE-ADS] Volume range:', filteredIdeas[filteredIdeas.length - 1].avgMonthlySearches, '-', filteredIdeas[0].avgMonthlySearches)
   }
 
-  return filteredIdeas
+  // Return with separate tracking for caching
+  return {
+    combined: filteredIdeas,
+    bySeedsOnly: keywordsBySeedsOnly.length > 0 ? keywordsBySeedsOnly : undefined,
+    byUrlOnly: keywordsByUrlOnly.length > 0 ? keywordsByUrlOnly : undefined
+  }
 }
 
 // Token cache to avoid regenerating on every request

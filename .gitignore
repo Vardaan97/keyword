@@ -43,4 +43,8 @@ test-api.sh
 
 # Google Ads OAuth tokens (sensitive)
 .google-ads-tokens.json
+
+# LinkedIn OAuth tokens (sensitive)
+.linkedin-tokens.json
+
 .env*.local
