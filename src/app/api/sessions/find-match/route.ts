@@ -26,6 +26,18 @@ const sessionsApi = anyApi.sessions as unknown as {
     },
     unknown
   >
+  getSessionAllKeywords: FunctionReference<
+    "query",
+    "public",
+    { sessionId: string },
+    { keywordIdeas: unknown[]; analyzedKeywords: unknown[] }
+  >
+}
+
+interface MatchingSession {
+  _id: string
+  keywordsStoredExternally?: boolean
+  [key: string]: unknown
 }
 
 export async function POST(request: NextRequest) {
@@ -76,6 +88,25 @@ export async function POST(request: NextRequest) {
 
     if (matchingSession) {
       // Found a match!
+      const session = matchingSession as MatchingSession
+
+      // If keywords are stored externally, fetch them
+      if (session.keywordsStoredExternally) {
+        const keywordsData = await client.query(sessionsApi.getSessionAllKeywords, {
+          sessionId: session._id,
+        })
+
+        return NextResponse.json({
+          match: {
+            ...session,
+            keywordIdeas: keywordsData.keywordIdeas,
+            analyzedKeywords: keywordsData.analyzedKeywords,
+          },
+          cacheHit: true,
+          message: "Found existing session with same URL, seeds, and prompt versions",
+        })
+      }
+
       return NextResponse.json({
         match: matchingSession,
         cacheHit: true,

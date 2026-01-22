@@ -24,6 +24,7 @@ import type * as prompts from "../prompts.js";
 import type * as queue from "../queue.js";
 import type * as rateLimits from "../rateLimits.js";
 import type * as sessions from "../sessions.js";
+import type * as urlAdGroupMappings from "../urlAdGroupMappings.js";
 
 import type {
   ApiFromModules,
@@ -48,6 +49,7 @@ declare const fullApi: ApiFromModules<{
   queue: typeof queue;
   rateLimits: typeof rateLimits;
   sessions: typeof sessions;
+  urlAdGroupMappings: typeof urlAdGroupMappings;
 }>;
 
 /**

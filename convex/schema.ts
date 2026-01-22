@@ -34,6 +34,7 @@ export default defineSchema({
       competitionIndex: v.number(),
       lowTopOfPageBidMicros: v.optional(v.number()),
       highTopOfPageBidMicros: v.optional(v.number()),
+      bidCurrency: v.optional(v.string()),
       inAccount: v.optional(v.boolean()),
       inAccountNames: v.optional(v.array(v.string())),
     })),
@@ -42,14 +43,14 @@ export default defineSchema({
   }).index("by_cache_key", ["cacheKey"])
     .index("by_expires", ["expiresAt"]),
 
-  // Research sessions for history (with full keyword data)
+  // Research sessions for history (metadata only - keywords stored in sessionKeywords)
   researchSessions: defineTable({
     courseName: v.string(),
     courseUrl: v.optional(v.string()),
     vendor: v.optional(v.string()),
     certificationCode: v.optional(v.string()),
     seedKeywords: v.array(v.string()),
-    // Summary counts
+    // Summary counts (always accurate even when keywords are in separate chunks)
     keywordsCount: v.number(),
     analyzedCount: v.number(),
     toAddCount: v.number(),
@@ -61,7 +62,8 @@ export default defineSchema({
     // Prompt versions used for this session (for smart cache matching)
     seedPromptVersion: v.optional(v.number()),
     analysisPromptVersion: v.optional(v.number()),
-    // Full keyword data for reload
+    // DEPRECATED: These fields are kept for backwards compatibility
+    // New sessions store keywords in sessionKeywords table instead
     keywordIdeas: v.optional(v.array(v.object({
       keyword: v.string(),
       avgMonthlySearches: v.number(),
@@ -69,6 +71,7 @@ export default defineSchema({
       competitionIndex: v.number(),
       lowTopOfPageBidMicros: v.optional(v.number()),
       highTopOfPageBidMicros: v.optional(v.number()),
+      bidCurrency: v.optional(v.string()),
       inAccount: v.optional(v.boolean()),
       inAccountNames: v.optional(v.array(v.string())),
     }))),
@@ -79,6 +82,7 @@ export default defineSchema({
       competitionIndex: v.number(),
       lowTopOfPageBidMicros: v.optional(v.number()),
       highTopOfPageBidMicros: v.optional(v.number()),
+      bidCurrency: v.optional(v.string()),
       inAccount: v.optional(v.boolean()),
       inAccountNames: v.optional(v.array(v.string())),
       // Analysis fields
@@ -95,7 +99,7 @@ export default defineSchema({
       baseScore: v.number(),
       competitionBonus: v.number(),
       finalScore: v.number(),
-      tier: v.string(),
+      tier: v.union(v.string(), v.number()), // Accept both string and number
       matchType: v.string(),
       action: v.string(),
       exclusionReason: v.optional(v.string()),
@@ -104,12 +108,58 @@ export default defineSchema({
     // Metadata
     status: v.optional(v.string()),  // 'completed' | 'error'
     error: v.optional(v.string()),
+    // Track if keywords are stored externally (in sessionKeywords table)
+    keywordsStoredExternally: v.optional(v.boolean()),
+    totalKeywordChunks: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.optional(v.number()),
   }).index("by_created", ["createdAt"])
     .index("by_vendor", ["vendor"])
     .index("by_course_name", ["courseName"])
     .index("by_url_geo", ["courseUrl", "geoTarget"]),
+
+  // Session keywords - stored in chunks to avoid 1MB document limit
+  // Each chunk is ~500KB to stay well under the limit
+  sessionKeywords: defineTable({
+    sessionId: v.id("researchSessions"),
+    chunkIndex: v.number(),         // 0, 1, 2, ... for ordering
+    chunkType: v.string(),          // 'ideas' or 'analyzed'
+    totalChunks: v.number(),        // Total chunks for this type
+    // Keywords in this chunk (max ~200-300 per chunk to stay under 500KB)
+    keywords: v.array(v.object({
+      keyword: v.string(),
+      avgMonthlySearches: v.number(),
+      competition: v.string(),
+      competitionIndex: v.number(),
+      lowTopOfPageBidMicros: v.optional(v.number()),
+      highTopOfPageBidMicros: v.optional(v.number()),
+      bidCurrency: v.optional(v.string()),
+      inAccount: v.optional(v.boolean()),
+      inAccountNames: v.optional(v.array(v.string())),
+      // Analysis fields (only present for 'analyzed' type)
+      courseRelevance: v.optional(v.number()),
+      relevanceStatus: v.optional(v.string()),
+      conversionPotential: v.optional(v.number()),
+      searchIntent: v.optional(v.number()),
+      vendorSpecificity: v.optional(v.number()),
+      keywordSpecificity: v.optional(v.number()),
+      actionWordStrength: v.optional(v.number()),
+      commercialSignals: v.optional(v.number()),
+      negativeSignals: v.optional(v.number()),
+      koenigFit: v.optional(v.number()),
+      baseScore: v.optional(v.number()),
+      competitionBonus: v.optional(v.number()),
+      finalScore: v.optional(v.number()),
+      tier: v.optional(v.union(v.string(), v.number())),
+      matchType: v.optional(v.string()),
+      action: v.optional(v.string()),
+      exclusionReason: v.optional(v.string()),
+      priority: v.optional(v.string()),
+    })),
+    createdAt: v.number(),
+  }).index("by_session", ["sessionId"])
+    .index("by_session_type", ["sessionId", "chunkType"])
+    .index("by_session_type_index", ["sessionId", "chunkType", "chunkIndex"]),
 
   // API request queue for retry mechanism
   requestQueue: defineTable({
@@ -827,4 +877,26 @@ export default defineSchema({
     .index("by_status", ["status"])
     .index("by_generatedAt", ["generatedAt"])
     .index("by_experimentId", ["experimentId"]),
+
+  // ============================================
+  // URL → AD GROUP MAPPINGS (for Google Ads Editor export)
+  // ============================================
+
+  // Maps course URLs to their Campaign/Ad Group in Google Ads
+  // Populated from Google Ads Ad Report CSV exports
+  // Used to generate Google Ads Editor compatible keyword exports
+  urlAdGroupMappings: defineTable({
+    url: v.string(),                    // Final URL (normalized, lowercase, no trailing slash)
+    campaignName: v.string(),           // e.g., "India - Cisco Courses", "Australia Popular Courses"
+    adGroupName: v.string(),            // e.g., "DCACI", "AZ-900: Microsoft Azure Fundamentals"
+    country: v.optional(v.string()),    // Extracted from campaign name (lowercase): "india", "australia", etc.
+    vendor: v.optional(v.string()),     // Extracted from campaign name: "cisco", "microsoft", etc.
+    accountId: v.string(),              // 'flexi' | 'bouquet-inr' - which Google Ads account
+    importedAt: v.number(),             // Timestamp when this mapping was imported
+  })
+    .index("by_url", ["url"])
+    .index("by_url_account", ["url", "accountId"])
+    .index("by_url_account_country", ["url", "accountId", "country"])
+    .index("by_campaign", ["campaignName"])
+    .index("by_account", ["accountId"]),
 });

@@ -73,7 +73,7 @@ export function KeywordResultsTable({ keywords, courseName, courseUrl }: Keyword
           comparison = (compOrder[a.competition] || 4) - (compOrder[b.competition] || 4)
           break
         case 'tier':
-          const tierOrder = { 'Tier 1': 1, 'Tier 2': 2, 'Tier 3': 3, 'Tier 4': 4, 'Review': 5, 'Exclude': 6 }
+          const tierOrder: Record<string, number> = { 'Tier 1': 1, 'Tier 2': 2, 'Tier 3': 3, 'Tier 4': 4, 'Review': 5, 'Exclude': 6 }
           comparison = (tierOrder[a.tier] || 6) - (tierOrder[b.tier] || 6)
           break
       }

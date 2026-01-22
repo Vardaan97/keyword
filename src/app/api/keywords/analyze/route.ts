@@ -277,6 +277,14 @@ CRITICAL OUTPUT REQUIREMENTS:
 
               if (analyzed) {
                 // AI analyzed this keyword - use its scores
+                // Handle tier - AI may return number (1, 2, 3) or string ('Tier 1', 'Review', etc.)
+                let tierValue = analyzed.tier || 'Review'
+                if (typeof tierValue === 'number') {
+                  tierValue = `Tier ${Math.round(tierValue)}`
+                } else if (typeof tierValue !== 'string') {
+                  tierValue = String(tierValue)
+                }
+
                 return {
                   keyword: original.keyword,
                   avgMonthlySearches: original.avgMonthlySearches,
@@ -298,7 +306,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                   baseScore: analyzed.baseScore || 50,
                   competitionBonus: analyzed.competitionBonus || 0,
                   finalScore: analyzed.finalScore || 50,
-                  tier: analyzed.tier || 'Review',
+                  tier: tierValue,
                   matchType: analyzed.matchType || 'PHRASE',
                   action: analyzed.action || 'REVIEW',
                   exclusionReason: analyzed.exclusionReason,

@@ -2,11 +2,17 @@
  * Convex Sessions Functions
  *
  * CRUD operations for research session management.
- * Stores full keyword data for reload, export, and re-analysis.
+ * Keywords are stored in chunks to avoid Convex's 1MB document limit.
+ *
+ * Storage Strategy:
+ * - Session metadata stored in researchSessions table (lightweight)
+ * - Keywords stored in sessionKeywords table in ~300KB chunks
+ * - First chunk loads immediately, rest load in background
  */
 
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { Id } from "./_generated/dataModel";
 
 // ============================================
 // Types
@@ -19,10 +25,12 @@ const keywordIdeaValidator = v.object({
   competitionIndex: v.number(),
   lowTopOfPageBidMicros: v.optional(v.number()),
   highTopOfPageBidMicros: v.optional(v.number()),
+  bidCurrency: v.optional(v.string()),
   inAccount: v.optional(v.boolean()),
   inAccountNames: v.optional(v.array(v.string())),
 });
 
+// Use v.any() for tier to accept both string and number, then transform in handler
 const analyzedKeywordValidator = v.object({
   keyword: v.string(),
   avgMonthlySearches: v.number(),
@@ -30,6 +38,7 @@ const analyzedKeywordValidator = v.object({
   competitionIndex: v.number(),
   lowTopOfPageBidMicros: v.optional(v.number()),
   highTopOfPageBidMicros: v.optional(v.number()),
+  bidCurrency: v.optional(v.string()),
   inAccount: v.optional(v.boolean()),
   inAccountNames: v.optional(v.array(v.string())),
   courseRelevance: v.number(),
@@ -45,19 +54,131 @@ const analyzedKeywordValidator = v.object({
   baseScore: v.number(),
   competitionBonus: v.number(),
   finalScore: v.number(),
-  tier: v.string(),
+  tier: v.any(), // Accept both string and number, transform in handler
   matchType: v.string(),
   action: v.string(),
   exclusionReason: v.optional(v.string()),
   priority: v.optional(v.string()),
 });
 
+// Keyword idea type
+type KeywordIdea = {
+  keyword: string;
+  avgMonthlySearches: number;
+  competition: string;
+  competitionIndex: number;
+  lowTopOfPageBidMicros?: number;
+  highTopOfPageBidMicros?: number;
+  bidCurrency?: string;
+  inAccount?: boolean;
+  inAccountNames?: string[];
+};
+
+// Analyzed keyword type
+type AnalyzedKeywordInput = {
+  keyword: string;
+  avgMonthlySearches: number;
+  competition: string;
+  competitionIndex: number;
+  lowTopOfPageBidMicros?: number;
+  highTopOfPageBidMicros?: number;
+  bidCurrency?: string;
+  inAccount?: boolean;
+  inAccountNames?: string[];
+  courseRelevance: number;
+  relevanceStatus: string;
+  conversionPotential: number;
+  searchIntent: number;
+  vendorSpecificity: number;
+  keywordSpecificity: number;
+  actionWordStrength: number;
+  commercialSignals: number;
+  negativeSignals: number;
+  koenigFit: number;
+  baseScore: number;
+  competitionBonus: number;
+  finalScore: number;
+  tier: string | number;
+  matchType: string;
+  action: string;
+  exclusionReason?: string;
+  priority?: string;
+};
+
+// ============================================
+// Constants
+// ============================================
+
+// Chunk size limits - aim for ~300KB per chunk (well under 1MB limit)
+const KEYWORDS_PER_CHUNK_IDEAS = 400;     // ~200 bytes per keyword idea
+const KEYWORDS_PER_CHUNK_ANALYZED = 200;  // ~600 bytes per analyzed keyword
+
+// For backwards compatibility - small sessions still fit in main document
+const MAX_INLINE_KEYWORDS_IDEAS = 100;
+const MAX_INLINE_KEYWORDS_ANALYZED = 50;
+
+// ============================================
+// Helper Functions
+// ============================================
+
+// Normalize tier values (number -> string)
+function normalizeTier(tier: string | number | undefined): string {
+  if (typeof tier === 'number') {
+    return `Tier ${Math.round(tier)}`;
+  }
+  if (typeof tier === 'string') {
+    return tier;
+  }
+  return 'Review';
+}
+
+// Normalize analyzed keywords (fix tier values)
+function normalizeAnalyzedKeywords(keywords: AnalyzedKeywordInput[]): AnalyzedKeywordInput[] {
+  return keywords.map(kw => ({
+    ...kw,
+    tier: normalizeTier(kw.tier),
+  }));
+}
+
+// Split array into chunks of specified size
+function chunkArray<T>(array: T[], chunkSize: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < array.length; i += chunkSize) {
+    chunks.push(array.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+// Sort analyzed keywords by importance (for initial display)
+function sortByImportance(keywords: AnalyzedKeywordInput[]): AnalyzedKeywordInput[] {
+  return [...keywords].sort((a, b) => {
+    // First prioritize by action (To Add > Review > Exclude)
+    const actionPriority: Record<string, number> = { 'To Add': 3, 'Review': 2, 'Exclude': 1 };
+    const aPriority = actionPriority[a.action] || 1;
+    const bPriority = actionPriority[b.action] || 1;
+    if (aPriority !== bPriority) return bPriority - aPriority;
+    // Then by finalScore
+    return (b.finalScore || 0) - (a.finalScore || 0);
+  });
+}
+
+// Sort keyword ideas by search volume (for initial display)
+function sortByVolume(keywords: KeywordIdea[]): KeywordIdea[] {
+  return [...keywords].sort((a, b) =>
+    (b.avgMonthlySearches || 0) - (a.avgMonthlySearches || 0)
+  );
+}
+
 // ============================================
 // Mutations
 // ============================================
 
 /**
- * Save a new research session
+ * Save a new research session with chunked keyword storage
+ *
+ * Keywords are stored in separate chunks to avoid 1MB limit:
+ * - Small sessions (<100 ideas, <50 analyzed): stored inline for backwards compatibility
+ * - Large sessions: stored in sessionKeywords table in ~300KB chunks
  */
 export const saveSession = mutation({
   args: {
@@ -73,7 +194,6 @@ export const saveSession = mutation({
     highPriorityCount: v.optional(v.number()),
     geoTarget: v.string(),
     dataSource: v.string(),
-    // Prompt versions used for this session
     seedPromptVersion: v.optional(v.number()),
     analysisPromptVersion: v.optional(v.number()),
     keywordIdeas: v.optional(v.array(keywordIdeaValidator)),
@@ -83,11 +203,118 @@ export const saveSession = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const keywordIdeas = args.keywordIdeas as KeywordIdea[] | undefined;
+    const analyzedKeywords = args.analyzedKeywords as AnalyzedKeywordInput[] | undefined;
+
+    // Normalize analyzed keywords
+    const normalizedAnalyzed = analyzedKeywords
+      ? normalizeAnalyzedKeywords(analyzedKeywords)
+      : undefined;
+
+    // Decide storage strategy based on size
+    const ideasCount = keywordIdeas?.length || 0;
+    const analyzedCount = normalizedAnalyzed?.length || 0;
+    const needsChunking = ideasCount > MAX_INLINE_KEYWORDS_IDEAS ||
+                          analyzedCount > MAX_INLINE_KEYWORDS_ANALYZED;
+
+    if (!needsChunking) {
+      // Small session - store inline (backwards compatible)
+      const sessionId = await ctx.db.insert("researchSessions", {
+        courseName: args.courseName,
+        courseUrl: args.courseUrl,
+        vendor: args.vendor,
+        certificationCode: args.certificationCode,
+        seedKeywords: args.seedKeywords,
+        keywordsCount: args.keywordsCount,
+        analyzedCount: args.analyzedCount,
+        toAddCount: args.toAddCount,
+        urgentCount: args.urgentCount,
+        highPriorityCount: args.highPriorityCount,
+        geoTarget: args.geoTarget,
+        dataSource: args.dataSource,
+        seedPromptVersion: args.seedPromptVersion,
+        analysisPromptVersion: args.analysisPromptVersion,
+        keywordIdeas: keywordIdeas,
+        analyzedKeywords: normalizedAnalyzed,
+        status: args.status,
+        error: args.error,
+        keywordsStoredExternally: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return sessionId;
+    }
+
+    // Large session - store keywords in chunks
+    // First create session without keywords
     const sessionId = await ctx.db.insert("researchSessions", {
-      ...args,
+      courseName: args.courseName,
+      courseUrl: args.courseUrl,
+      vendor: args.vendor,
+      certificationCode: args.certificationCode,
+      seedKeywords: args.seedKeywords,
+      keywordsCount: args.keywordsCount,
+      analyzedCount: args.analyzedCount,
+      toAddCount: args.toAddCount,
+      urgentCount: args.urgentCount,
+      highPriorityCount: args.highPriorityCount,
+      geoTarget: args.geoTarget,
+      dataSource: args.dataSource,
+      seedPromptVersion: args.seedPromptVersion,
+      analysisPromptVersion: args.analysisPromptVersion,
+      keywordIdeas: undefined, // Stored externally
+      analyzedKeywords: undefined, // Stored externally
+      status: args.status,
+      error: args.error,
+      keywordsStoredExternally: true,
       createdAt: now,
       updatedAt: now,
     });
+
+    let totalChunks = 0;
+
+    // Store keyword ideas in chunks (sorted by volume for progressive loading)
+    if (keywordIdeas && keywordIdeas.length > 0) {
+      const sortedIdeas = sortByVolume(keywordIdeas);
+      const ideaChunks = chunkArray(sortedIdeas, KEYWORDS_PER_CHUNK_IDEAS);
+
+      for (let i = 0; i < ideaChunks.length; i++) {
+        await ctx.db.insert("sessionKeywords", {
+          sessionId,
+          chunkIndex: i,
+          chunkType: "ideas",
+          totalChunks: ideaChunks.length,
+          keywords: ideaChunks[i],
+          createdAt: now,
+        });
+      }
+      totalChunks += ideaChunks.length;
+    }
+
+    // Store analyzed keywords in chunks (sorted by importance for progressive loading)
+    if (normalizedAnalyzed && normalizedAnalyzed.length > 0) {
+      const sortedAnalyzed = sortByImportance(normalizedAnalyzed);
+      const analyzedChunks = chunkArray(sortedAnalyzed, KEYWORDS_PER_CHUNK_ANALYZED);
+
+      for (let i = 0; i < analyzedChunks.length; i++) {
+        await ctx.db.insert("sessionKeywords", {
+          sessionId,
+          chunkIndex: i,
+          chunkType: "analyzed",
+          totalChunks: analyzedChunks.length,
+          keywords: analyzedChunks[i],
+          createdAt: now,
+        });
+      }
+      totalChunks += analyzedChunks.length;
+    }
+
+    // Update session with chunk count
+    await ctx.db.patch(sessionId, { totalKeywordChunks: totalChunks });
+
+    console.log(`[sessions:saveSession] Saved "${args.courseName}" with ${totalChunks} chunks:`,
+      `${ideasCount} ideas, ${analyzedCount} analyzed keywords`);
+
     return sessionId;
   },
 });
@@ -107,25 +334,86 @@ export const updateSession = mutation({
     error: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { sessionId, ...updates } = args;
-    await ctx.db.patch(sessionId, {
-      ...updates,
-      updatedAt: Date.now(),
-    });
+    const { sessionId, analyzedKeywords, ...updates } = args;
+    const now = Date.now();
+
+    // If updating analyzed keywords, handle chunking
+    if (analyzedKeywords !== undefined) {
+      const normalized = normalizeAnalyzedKeywords(analyzedKeywords as AnalyzedKeywordInput[]);
+
+      // Delete old analyzed keyword chunks
+      const oldChunks = await ctx.db
+        .query("sessionKeywords")
+        .withIndex("by_session_type", q => q.eq("sessionId", sessionId).eq("chunkType", "analyzed"))
+        .collect();
+
+      for (const chunk of oldChunks) {
+        await ctx.db.delete(chunk._id);
+      }
+
+      // If small enough, store inline
+      if (normalized.length <= MAX_INLINE_KEYWORDS_ANALYZED) {
+        await ctx.db.patch(sessionId, {
+          ...updates,
+          analyzedKeywords: normalized,
+          keywordsStoredExternally: false,
+          updatedAt: now,
+        });
+      } else {
+        // Store in chunks
+        const sortedAnalyzed = sortByImportance(normalized);
+        const chunks = chunkArray(sortedAnalyzed, KEYWORDS_PER_CHUNK_ANALYZED);
+
+        for (let i = 0; i < chunks.length; i++) {
+          await ctx.db.insert("sessionKeywords", {
+            sessionId,
+            chunkIndex: i,
+            chunkType: "analyzed",
+            totalChunks: chunks.length,
+            keywords: chunks[i],
+            createdAt: now,
+          });
+        }
+
+        await ctx.db.patch(sessionId, {
+          ...updates,
+          analyzedKeywords: undefined,
+          keywordsStoredExternally: true,
+          updatedAt: now,
+        });
+      }
+    } else {
+      await ctx.db.patch(sessionId, {
+        ...updates,
+        updatedAt: now,
+      });
+    }
+
     return sessionId;
   },
 });
 
 /**
- * Delete a single session
+ * Delete a single session and its keyword chunks
  */
 export const deleteSession = mutation({
   args: {
     sessionId: v.id("researchSessions"),
   },
   handler: async (ctx, args) => {
+    // Delete all keyword chunks first
+    const chunks = await ctx.db
+      .query("sessionKeywords")
+      .withIndex("by_session", q => q.eq("sessionId", args.sessionId))
+      .collect();
+
+    for (const chunk of chunks) {
+      await ctx.db.delete(chunk._id);
+    }
+
+    // Delete the session
     await ctx.db.delete(args.sessionId);
-    return { success: true };
+    return { success: true, chunksDeleted: chunks.length };
   },
 });
 
@@ -138,11 +426,26 @@ export const bulkDeleteSessions = mutation({
   },
   handler: async (ctx, args) => {
     let deletedCount = 0;
+    let chunksDeleted = 0;
+
     for (const sessionId of args.sessionIds) {
+      // Delete keyword chunks
+      const chunks = await ctx.db
+        .query("sessionKeywords")
+        .withIndex("by_session", q => q.eq("sessionId", sessionId))
+        .collect();
+
+      for (const chunk of chunks) {
+        await ctx.db.delete(chunk._id);
+        chunksDeleted++;
+      }
+
+      // Delete session
       await ctx.db.delete(sessionId);
       deletedCount++;
     }
-    return { deletedCount };
+
+    return { deletedCount, chunksDeleted };
   },
 });
 
@@ -158,13 +461,21 @@ export const clearAllSessions = mutation({
       throw new Error("Invalid confirmation token");
     }
 
+    // Delete all keyword chunks first
+    const allChunks = await ctx.db.query("sessionKeywords").collect();
+    for (const chunk of allChunks) {
+      await ctx.db.delete(chunk._id);
+    }
+
+    // Delete all sessions
     const sessions = await ctx.db.query("researchSessions").collect();
     let deletedCount = 0;
     for (const session of sessions) {
       await ctx.db.delete(session._id);
       deletedCount++;
     }
-    return { deletedCount };
+
+    return { deletedCount, chunksDeleted: allChunks.length };
   },
 });
 
@@ -190,7 +501,6 @@ export const getSessions = query({
       .withIndex("by_created")
       .order("desc");
 
-    // Apply vendor filter if provided
     if (args.vendor) {
       sessionsQuery = ctx.db
         .query("researchSessions")
@@ -200,7 +510,6 @@ export const getSessions = query({
 
     const allSessions = await sessionsQuery.collect();
 
-    // Filter by search query if provided
     let filteredSessions = allSessions;
     if (args.searchQuery) {
       const query = args.searchQuery.toLowerCase();
@@ -211,7 +520,6 @@ export const getSessions = query({
       );
     }
 
-    // Handle cursor-based pagination
     let startIndex = 0;
     if (args.cursor) {
       const cursorIndex = filteredSessions.findIndex(s => s._id === args.cursor);
@@ -224,7 +532,7 @@ export const getSessions = query({
     const hasMore = startIndex + limit < filteredSessions.length;
     const nextCursor = hasMore ? paginatedSessions[paginatedSessions.length - 1]?._id : null;
 
-    // Return lightweight session data (no keywords arrays)
+    // Return lightweight session data (no keywords)
     const sessions = paginatedSessions.map(s => ({
       _id: s._id,
       courseName: s.courseName,
@@ -241,6 +549,8 @@ export const getSessions = query({
       dataSource: s.dataSource,
       status: s.status,
       error: s.error,
+      keywordsStoredExternally: s.keywordsStoredExternally,
+      totalKeywordChunks: s.totalKeywordChunks,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
     }));
@@ -255,7 +565,8 @@ export const getSessions = query({
 });
 
 /**
- * Get a single session with full keyword data
+ * Get a single session metadata (without keywords)
+ * Use getSessionKeywords to load keywords progressively
  */
 export const getSession = query({
   args: {
@@ -264,6 +575,108 @@ export const getSession = query({
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
     return session;
+  },
+});
+
+/**
+ * Get keyword chunks for a session progressively
+ *
+ * For chunked sessions: returns one chunk at a time
+ * For inline sessions: returns all keywords in chunk 0
+ */
+export const getSessionKeywords = query({
+  args: {
+    sessionId: v.id("researchSessions"),
+    chunkType: v.string(), // 'ideas' or 'analyzed'
+    chunkIndex: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) {
+      return { keywords: [], totalChunks: 0, hasMore: false };
+    }
+
+    // If keywords are stored inline (small session)
+    if (!session.keywordsStoredExternally) {
+      if (args.chunkIndex > 0) {
+        return { keywords: [], totalChunks: 1, hasMore: false };
+      }
+
+      const keywords = args.chunkType === 'ideas'
+        ? session.keywordIdeas || []
+        : session.analyzedKeywords || [];
+
+      return {
+        keywords,
+        totalChunks: 1,
+        hasMore: false,
+      };
+    }
+
+    // Keywords stored in chunks - fetch the requested chunk
+    const chunk = await ctx.db
+      .query("sessionKeywords")
+      .withIndex("by_session_type_index", q =>
+        q.eq("sessionId", args.sessionId)
+         .eq("chunkType", args.chunkType)
+         .eq("chunkIndex", args.chunkIndex)
+      )
+      .first();
+
+    if (!chunk) {
+      return { keywords: [], totalChunks: 0, hasMore: false };
+    }
+
+    return {
+      keywords: chunk.keywords,
+      totalChunks: chunk.totalChunks,
+      hasMore: args.chunkIndex < chunk.totalChunks - 1,
+    };
+  },
+});
+
+/**
+ * Get all keywords for a session (use carefully - can be large)
+ * Combines all chunks into single arrays
+ */
+export const getSessionAllKeywords = query({
+  args: {
+    sessionId: v.id("researchSessions"),
+  },
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) {
+      return { keywordIdeas: [], analyzedKeywords: [] };
+    }
+
+    // If stored inline
+    if (!session.keywordsStoredExternally) {
+      return {
+        keywordIdeas: session.keywordIdeas || [],
+        analyzedKeywords: session.analyzedKeywords || [],
+      };
+    }
+
+    // Fetch all chunks
+    const allChunks = await ctx.db
+      .query("sessionKeywords")
+      .withIndex("by_session", q => q.eq("sessionId", args.sessionId))
+      .collect();
+
+    // Separate and sort by chunk index
+    const ideaChunks = allChunks
+      .filter(c => c.chunkType === 'ideas')
+      .sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+    const analyzedChunks = allChunks
+      .filter(c => c.chunkType === 'analyzed')
+      .sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+    // Combine keywords
+    const keywordIdeas = ideaChunks.flatMap(c => c.keywords);
+    const analyzedKeywords = analyzedChunks.flatMap(c => c.keywords);
+
+    return { keywordIdeas, analyzedKeywords };
   },
 });
 
@@ -280,17 +693,14 @@ export const getSessionStats = query({
     const totalToAdd = sessions.reduce((sum, s) => sum + s.toAddCount, 0);
     const totalUrgent = sessions.reduce((sum, s) => sum + s.urgentCount, 0);
 
-    // Get unique vendors
     const vendors = [...new Set(sessions.map(s => s.vendor).filter(Boolean))];
 
-    // Get sessions by vendor
     const byVendor: Record<string, number> = {};
     sessions.forEach(s => {
       const vendor = s.vendor || 'Unknown';
       byVendor[vendor] = (byVendor[vendor] || 0) + 1;
     });
 
-    // Get recent sessions (last 7 days)
     const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
     const recentCount = sessions.filter(s => s.createdAt > weekAgo).length;
 
@@ -359,9 +769,6 @@ export const getVendors = query({
 
 /**
  * Find a matching session for smart cache check
- *
- * Checks if the same URL + seeds + geo + prompt versions have been processed before.
- * Returns the matching session with full data if found.
  */
 export const findMatchingSession = query({
   args: {
@@ -372,13 +779,11 @@ export const findMatchingSession = query({
     analysisPromptVersion: v.number(),
   },
   handler: async (ctx, args) => {
-    // Normalize seed keywords for comparison (sorted, lowercase)
     const normalizedSeeds = args.seedKeywords
       .map(s => s.toLowerCase().trim())
       .sort()
       .join(",");
 
-    // Query sessions by URL and geoTarget first (using index)
     const sessions = await ctx.db
       .query("researchSessions")
       .withIndex("by_url_geo", (q) =>
@@ -386,23 +791,18 @@ export const findMatchingSession = query({
       )
       .collect();
 
-    // Filter for matching prompt versions and seed keywords
     for (const session of sessions) {
-      // Skip incomplete sessions
       if (session.status !== "completed") continue;
-
-      // Check prompt versions match
       if (session.seedPromptVersion !== args.seedPromptVersion) continue;
       if (session.analysisPromptVersion !== args.analysisPromptVersion) continue;
 
-      // Check seed keywords match (normalized comparison)
       const sessionSeeds = session.seedKeywords
         .map(s => s.toLowerCase().trim())
         .sort()
         .join(",");
 
       if (sessionSeeds === normalizedSeeds) {
-        // Found a match! Return full session data
+        // Return session metadata - caller should use getSessionAllKeywords for full data
         return {
           _id: session._id,
           courseName: session.courseName,
@@ -419,15 +819,13 @@ export const findMatchingSession = query({
           dataSource: session.dataSource,
           seedPromptVersion: session.seedPromptVersion,
           analysisPromptVersion: session.analysisPromptVersion,
-          keywordIdeas: session.keywordIdeas,
-          analyzedKeywords: session.analyzedKeywords,
+          keywordsStoredExternally: session.keywordsStoredExternally,
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
         };
       }
     }
 
-    // No match found
     return null;
   },
 });
