@@ -13,7 +13,7 @@ interface NavItem {
 }
 
 // External keyword planner URL - set via environment variable
-const KEYWORD_PLANNER_URL = process.env.NEXT_PUBLIC_KEYWORD_PLANNER_URL || 'https://keyword-nhpv.vercel.app'
+const KEYWORD_PLANNER_URL = process.env.NEXT_PUBLIC_KEYWORD_PLANNER_URL || 'https://keyword-planner-six.vercel.app'
 
 const navigation: NavItem[] = [
   {
