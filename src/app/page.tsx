@@ -25,6 +25,10 @@ import { usePrompts } from "@/hooks/usePrompts"
 import { PromptVersionHistory } from "@/components/prompt-version-history"
 import { SmartCacheAlert } from "@/components/smart-cache-alert"
 import { ExportEditorModal } from "@/components/export-editor-modal"
+import { BatchPreflightModal, calculatePreflightInfo } from "@/components/batch-preflight-modal"
+import { QueueProgressDisplay } from "@/components/queue-progress-display"
+import { apiQueue, QueueProgress, isQuotaError } from "@/lib/api-queue"
+import { BatchPreflightInfo } from "@/types"
 
 // Format elapsed time as mm:ss
 function formatTime(ms: number): string {
@@ -251,6 +255,20 @@ export default function Home() {
 
   // Export Editor modal state
   const [showExportEditorModal, setShowExportEditorModal] = useState(false)
+
+  // Pre-flight modal state for batch processing
+  const [showPreflightModal, setShowPreflightModal] = useState(false)
+  const [preflightInfo, setPreflightInfo] = useState<BatchPreflightInfo | null>(null)
+
+  // Queue progress state for sequential processing
+  const [queueProgress, setQueueProgress] = useState<QueueProgress>({
+    phase: 'idle',
+    completed: 0,
+    total: 0,
+    failed: 0,
+    estimatedTimeRemaining: 0,
+    isPaused: false
+  })
 
   // Input mode: CSV upload or manual entry
   const [inputMode, setInputMode] = useState<'csv' | 'manual'>('csv')
@@ -974,8 +992,25 @@ export default function Home() {
     }
   }
 
-  // Start batch processing with concurrent execution
-  const startProcessing = async () => {
+  // Show pre-flight modal before starting batch processing
+  const showPreflightAndStart = () => {
+    const pendingItems = batchItems.filter(item => item.status === 'pending')
+    const cachedCount = batchItems.filter(item => item.status === 'cached' || item.cacheHit).length
+
+    // Calculate pre-flight info
+    const info = calculatePreflightInfo(pendingItems.length, cachedCount, dataSource)
+    setPreflightInfo(info)
+    setShowPreflightModal(true)
+  }
+
+  // Confirm and start sequential batch processing
+  const confirmAndStartProcessing = async () => {
+    setShowPreflightModal(false)
+    await startSequentialProcessing()
+  }
+
+  // Start batch processing with TRUE sequential execution via API queue
+  const startSequentialProcessing = async () => {
     setIsProcessing(true)
     abortRef.current = false
     const controller = new AbortController()
@@ -983,45 +1018,105 @@ export default function Home() {
     startTimer()
 
     const pendingItems = batchItems.filter(item => item.status === 'pending')
-    console.log(`[BATCH] Starting CONCURRENT batch processing for ${pendingItems.length} courses...`)
-    console.log(`[BATCH] Rate limit: ${GOOGLE_API_DELAY_MS}ms between Google API calls`)
+    console.log(`[BATCH] Starting SEQUENTIAL batch processing for ${pendingItems.length} courses...`)
+    console.log(`[BATCH] Using API Queue Manager for true sequential execution`)
 
-    // Process each item with staggered Google API calls
-    // All other operations (seeds, cache check, analysis) run as fast as possible
-    const processPromises = pendingItems.map(async (item, index) => {
-      if (abortRef.current || controller.signal.aborted) {
-        console.log(`[BATCH] Skipping ${item.courseInput.courseName} - processing stopped`)
-        return null
-      }
+    // Clear any previous queue state
+    apiQueue.clear()
 
-      // Add delay for Google API rate limiting (stagger by index)
-      // Items 0, 1, 2... will have delays 0s, 5s, 10s... for their API calls
-      const apiDelay = index * GOOGLE_API_DELAY_MS
-      console.log(`[BATCH] Course ${index + 1}/${pendingItems.length}: ${item.courseInput.courseName} (API delay: ${apiDelay}ms)`)
-
-      try {
-        const processedItem = await processItemWithDelay(item, controller.signal, apiDelay)
-        setBatchItems(prev => prev.map(it => it.id === item.id ? processedItem : it))
-
-        if (processedItem.status === 'completed') {
-          // Save in background - don't wait for it
-          saveCompletedItem(processedItem)
-        }
-        return processedItem
-      } catch (err) {
-        console.error(`[BATCH] Error processing ${item.courseInput.courseName}:`, err)
-        return null
+    // Subscribe to queue progress updates
+    const unsubscribe = apiQueue.subscribe((event) => {
+      if (event.type === 'progress') {
+        setQueueProgress(event.data as QueueProgress)
+      } else if (event.type === 'quota_exhausted') {
+        console.log('[BATCH] Quota exhausted, queue will auto-resume')
       }
     })
 
-    // Wait for all courses to complete (they run concurrently with staggered API calls)
-    await Promise.all(processPromises)
+    // Enqueue all items
+    for (const item of pendingItems) {
+      apiQueue.enqueue({
+        courseId: item.id,
+        courseName: item.courseInput.courseName,
+        type: 'fetch_keywords',
+        priority: 1
+      })
+    }
 
-    console.log('[BATCH] Batch processing finished')
+    // Process function that the queue will call for each item
+    const processQueueItem = async (request: { courseId: string }, signal: AbortSignal) => {
+      const item = batchItems.find(it => it.id === request.courseId)
+      if (!item) {
+        throw new Error(`Item not found: ${request.courseId}`)
+      }
+
+      // Check abort
+      if (signal.aborted || abortRef.current) {
+        throw new Error('Processing stopped by user')
+      }
+
+      // Process the item (reuse existing processItemWithDelay but with 0 delay since queue handles timing)
+      const processedItem = await processItemWithDelay(item, signal, 0)
+      setBatchItems(prev => prev.map(it => it.id === item.id ? processedItem : it))
+
+      if (processedItem.status === 'completed') {
+        // Save in background - don't wait for it
+        saveCompletedItem(processedItem)
+      }
+
+      // Check for quota errors in the result
+      if (processedItem.status === 'error' && processedItem.error && isQuotaError(processedItem.error)) {
+        apiQueue.handleQuotaExhausted()
+        throw new Error(processedItem.error)
+      }
+    }
+
+    // Start the queue
+    try {
+      await apiQueue.start(processQueueItem)
+    } catch (err) {
+      console.error('[BATCH] Queue processing error:', err)
+    } finally {
+      unsubscribe()
+    }
+
+    console.log('[BATCH] Sequential batch processing finished')
     stopTimer()
     abortControllerRef.current = null
     setIsProcessing(false)
     setActiveView('results')
+    setQueueProgress({
+      phase: 'completed',
+      completed: apiQueue.getState().completedRequests,
+      total: apiQueue.getState().totalRequests,
+      failed: apiQueue.getState().failedRequests,
+      estimatedTimeRemaining: 0,
+      isPaused: false
+    })
+  }
+
+  // Queue control functions
+  const pauseQueue = () => {
+    apiQueue.pause('user_paused')
+    setQueueProgress(prev => ({ ...prev, isPaused: true, pauseReason: 'user_paused' }))
+  }
+
+  const resumeQueue = () => {
+    apiQueue.resume()
+    setQueueProgress(prev => ({ ...prev, isPaused: false, pauseReason: undefined }))
+  }
+
+  const cancelQueue = () => {
+    apiQueue.cancel()
+    abortRef.current = true
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+  }
+
+  // Legacy startProcessing - now shows preflight modal instead
+  const startProcessing = () => {
+    showPreflightAndStart()
   }
 
   // Auto-start processing after manual entry (waits for state to update)
@@ -2367,7 +2462,18 @@ export default function Home() {
 
         {/* Processing View */}
         {(activeView === 'processing' || activeView === 'results') && batchItems.length > 0 && (
-          <div className="grid grid-cols-12 gap-6">
+          <div className="space-y-4">
+            {/* Queue Progress Display - shown during processing */}
+            {isProcessing && queueProgress.phase !== 'idle' && (
+              <QueueProgressDisplay
+                progress={queueProgress}
+                onPause={pauseQueue}
+                onResume={resumeQueue}
+                onCancel={cancelQueue}
+              />
+            )}
+
+            <div className="grid grid-cols-12 gap-6">
             {/* Left Panel - Course List */}
             <div className="col-span-4 space-y-4">
               {/* Current Settings Indicator */}
@@ -3208,6 +3314,7 @@ export default function Home() {
               )}
             </div>
           </div>
+          </div>
         )}
       </main>
 
@@ -3260,6 +3367,16 @@ export default function Home() {
           courseName={selectedItem.courseInput.courseName}
           targetCountry={targetCountry}
           selectedAccountId={selectedGoogleAdsAccountId}
+        />
+      )}
+
+      {/* Batch Pre-flight Confirmation Modal */}
+      {preflightInfo && (
+        <BatchPreflightModal
+          isOpen={showPreflightModal}
+          onConfirm={confirmAndStartProcessing}
+          onCancel={() => setShowPreflightModal(false)}
+          preflightInfo={preflightInfo}
         />
       )}
     </div>

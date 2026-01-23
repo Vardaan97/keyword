@@ -1,4 +1,4 @@
-import { KeywordIdea } from '@/types'
+import { KeywordIdea, ApiErrorResponse } from '@/types'
 import { createClient } from '@supabase/supabase-js'
 
 // Google Ads API v22 (latest as of December 2025)
@@ -189,6 +189,119 @@ export function getRateLimitStatus(): Record<string, {
   }
 
   return status
+}
+
+// ============================================================================
+// STRUCTURED ERROR HANDLING
+// ============================================================================
+
+/**
+ * Classify an error message into a structured error type
+ */
+export function classifyError(error: unknown, accountId?: string): ApiErrorResponse {
+  const message = error instanceof Error ? error.message : String(error)
+  const lowerMessage = message.toLowerCase()
+
+  // Quota exhausted
+  if (lowerMessage.includes('quota') || lowerMessage.includes('exhausted') ||
+      message.includes('RESOURCE_EXHAUSTED')) {
+    return {
+      type: 'QUOTA_EXHAUSTED',
+      message: 'Google Ads API quota exhausted. The queue will automatically resume when the quota resets.',
+      retryAfter: 5 * 60, // 5 minutes
+      isRetryable: true,
+      accountId,
+      details: message
+    }
+  }
+
+  // Rate limited
+  if (lowerMessage.includes('rate') || lowerMessage.includes('limit') ||
+      message.includes('429') || message.includes('RATE_LIMIT_EXCEEDED')) {
+    return {
+      type: 'RATE_LIMITED',
+      message: 'Too many requests. Slowing down...',
+      retryAfter: 60, // 1 minute
+      isRetryable: true,
+      accountId,
+      details: message
+    }
+  }
+
+  // Authentication errors
+  if (lowerMessage.includes('token') || lowerMessage.includes('auth') ||
+      lowerMessage.includes('invalid_grant') || lowerMessage.includes('unauthorized') ||
+      message.includes('401') || message.includes('403')) {
+    return {
+      type: 'AUTH',
+      message: 'Authentication error. Please check your Google Ads credentials.',
+      isRetryable: false,
+      accountId,
+      details: message
+    }
+  }
+
+  // Network errors
+  if (lowerMessage.includes('network') || lowerMessage.includes('econnreset') ||
+      lowerMessage.includes('etimedout') || lowerMessage.includes('enotfound') ||
+      lowerMessage.includes('fetch failed') || message.includes('503') ||
+      message.includes('504')) {
+    return {
+      type: 'NETWORK',
+      message: 'Network error. Will retry automatically.',
+      retryAfter: 10, // 10 seconds
+      isRetryable: true,
+      details: message
+    }
+  }
+
+  // Unknown error
+  return {
+    type: 'UNKNOWN',
+    message: message || 'An unexpected error occurred',
+    isRetryable: false,
+    accountId,
+    details: message
+  }
+}
+
+/**
+ * Check if any account has quota exhausted
+ */
+export function isAnyQuotaExhausted(): { exhausted: boolean; accountId?: string; resetAt?: number } {
+  for (const [accountId, state] of accountRateLimits) {
+    if (state.quotaExhausted) {
+      return {
+        exhausted: true,
+        accountId,
+        resetAt: state.quotaResetAt
+      }
+    }
+  }
+  return { exhausted: false }
+}
+
+/**
+ * Get the earliest quota reset time across all accounts
+ */
+export function getEarliestQuotaReset(): number | null {
+  let earliest: number | null = null
+  for (const [, state] of accountRateLimits) {
+    if (state.quotaExhausted && state.quotaResetAt) {
+      if (earliest === null || state.quotaResetAt < earliest) {
+        earliest = state.quotaResetAt
+      }
+    }
+  }
+  return earliest
+}
+
+/**
+ * Reset all rate limit states (useful for testing or manual reset)
+ */
+export function resetAllRateLimits(): void {
+  accountRateLimits.clear()
+  console.log('[GOOGLE-ADS] All rate limit states reset')
 }
 
 /**

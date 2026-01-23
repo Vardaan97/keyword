@@ -216,3 +216,69 @@ export type DetailViewMode = 'raw' | 'analyzed'
 export interface SelectableKeyword extends AnalyzedKeyword {
   selected: boolean
 }
+
+// ============================================
+// API Queue & Structured Error Types
+// ============================================
+
+// Structured API error response for better error handling
+export interface ApiErrorResponse {
+  type: 'QUOTA_EXHAUSTED' | 'RATE_LIMITED' | 'AUTH' | 'NETWORK' | 'VALIDATION' | 'UNKNOWN'
+  message: string
+  retryAfter?: number  // seconds until retry is allowed
+  isRetryable: boolean
+  accountId?: string   // affected account (for quota errors)
+  details?: string     // additional context
+}
+
+// Enhanced API response with structured errors
+export interface EnhancedApiResponse<T> {
+  success: boolean
+  data?: T
+  error?: ApiErrorResponse
+  meta?: {
+    source?: string
+    fallback?: boolean
+    googleError?: string
+    cached?: boolean
+    cacheAge?: number
+    processingTimeMs?: number
+    requestId?: string
+  }
+}
+
+// Pre-flight validation for batch processing
+export interface BatchPreflightInfo {
+  totalCourses: number
+  cachedCourses: number
+  coursesNeedingApi: number
+  estimatedApiCalls: number
+  estimatedMinutes: number
+  estimatedTimeFormatted: string
+  warnings: string[]
+  canProceed: boolean
+  blockers: string[]  // issues that prevent processing
+}
+
+// Batch processing progress for UI
+export interface BatchProgressState {
+  phase: 'idle' | 'validating' | 'checking_cache' | 'generating_seeds' | 'fetching_keywords' | 'analyzing' | 'completed' | 'paused' | 'error'
+  totalCourses: number
+  completedCourses: number
+  failedCourses: number
+  currentCourse?: {
+    id: string
+    name: string
+    step: string
+  }
+  queuePosition?: number
+  estimatedTimeRemaining: number
+  estimatedTimeFormatted: string
+  isPaused: boolean
+  pauseReason?: 'quota_exhausted' | 'user_paused' | 'error'
+  resumeAt?: number
+  resumeAtFormatted?: string
+  adaptiveDelayMs?: number
+  consecutiveSuccesses?: number
+  consecutiveFailures?: number
+}

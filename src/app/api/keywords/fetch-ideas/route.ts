@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId, GOOGLE_ADS_ACCOUNTS, getAccountName, getRealAccountIds } from '@/lib/google-ads'
+import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId, GOOGLE_ADS_ACCOUNTS, getAccountName, getRealAccountIds, classifyError, markAccountQuotaExhausted } from '@/lib/google-ads'
 import { getKeywordData, getRelatedKeywords, getKeywordsEverywhereConfig, CountryCode } from '@/lib/keywords-everywhere'
 import { getCachedKeywords, setCachedKeywords, getDatabaseStatus, UnifiedKeywordData, saveKeywordVolumes } from '@/lib/database'
 import { getRefreshToken } from '@/lib/token-storage'
-import { KeywordIdea, ApiResponse } from '@/types'
+import { KeywordIdea, ApiResponse, EnhancedApiResponse, ApiErrorResponse } from '@/types'
 
 interface FetchIdeasRequest {
   seedKeywords: string[]
@@ -189,7 +189,7 @@ async function fetchFromKeywordsEverywhere(
   return filteredResults
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<KeywordIdea[]>>> {
+export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<KeywordIdea[]> | EnhancedApiResponse<KeywordIdea[]>>> {
   const startTime = Date.now()
 
   // Parse body outside try block so it's accessible in catch for fallback
@@ -667,15 +667,31 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
 
   } catch (googleError) {
     console.error('[FETCH-IDEAS] Google Ads API error:', googleError)
+
+    // Classify the error for structured response
+    const structuredError = classifyError(googleError, customerId)
     const errorMessage = googleError instanceof Error ? googleError.message : 'Unknown error'
 
-    // If source is explicitly 'google', don't fallback
+    console.log('[FETCH-IDEAS] Error classified as:', structuredError.type)
+
+    // Mark quota exhausted if applicable
+    if (structuredError.type === 'QUOTA_EXHAUSTED') {
+      await markAccountQuotaExhausted(customerId, 5)
+      console.log('[FETCH-IDEAS] Marked account quota as exhausted, will reset in 5 minutes')
+    }
+
+    // If source is explicitly 'google', don't fallback - return structured error
     if (source === 'google') {
       console.log('[FETCH-IDEAS] Source is "google", not falling back')
-      return NextResponse.json({
+      const response: EnhancedApiResponse<KeywordIdea[]> = {
         success: false,
-        error: errorMessage
-      }, { status: 500 })
+        error: structuredError,
+        meta: {
+          source: 'google_ads',
+          processingTimeMs: Date.now() - startTime
+        }
+      }
+      return NextResponse.json(response, { status: structuredError.type === 'AUTH' ? 401 : 500 })
     }
 
     // Auto mode: Try Keywords Everywhere as fallback
@@ -692,16 +708,42 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       return NextResponse.json({
         success: true,
         data: keywordIdeas,
-        meta: { source: 'keywords_everywhere', fallback: true, googleError: errorMessage, processingTimeMs }
+        meta: {
+          source: 'keywords_everywhere',
+          fallback: true,
+          googleError: errorMessage,
+          googleErrorType: structuredError.type,
+          processingTimeMs
+        }
       })
     } catch (keError) {
       console.error('[FETCH-IDEAS] Keywords Everywhere API also failed:', keError)
 
-      // Both APIs failed
-      return NextResponse.json({
+      // Both APIs failed - return structured error with details about both failures
+      const keErrorClassified = classifyError(keError)
+
+      const combinedError: ApiErrorResponse = {
+        type: structuredError.type, // Use Google Ads error type as primary
+        message: `Google Ads: ${structuredError.message}. Keywords Everywhere: ${keErrorClassified.message}`,
+        isRetryable: structuredError.isRetryable || keErrorClassified.isRetryable,
+        retryAfter: structuredError.retryAfter,
+        accountId: customerId,
+        details: JSON.stringify({
+          googleAds: structuredError,
+          keywordsEverywhere: keErrorClassified
+        })
+      }
+
+      const response: EnhancedApiResponse<KeywordIdea[]> = {
         success: false,
-        error: `Google Ads: ${errorMessage}. Keywords Everywhere: ${keError instanceof Error ? keError.message : 'Unknown error'}`
-      }, { status: 500 })
+        error: combinedError,
+        meta: {
+          source: 'none',
+          processingTimeMs: Date.now() - startTime
+        }
+      }
+
+      return NextResponse.json(response, { status: 500 })
     }
   }
 }
