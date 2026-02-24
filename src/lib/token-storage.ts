@@ -49,6 +49,8 @@ async function saveTokenToSupabase(refreshToken: string, userEmail?: string): Pr
       .upsert({
         cache_key: SUPABASE_TOKEN_KEY,
         keywords: [{ refreshToken, updatedBy: userEmail || 'unknown', updatedAt: new Date().toISOString() }],
+        geo_target: '_system',
+        source: '_system',
         expires_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
         updated_at: new Date().toISOString()
       }, { onConflict: 'cache_key' })
