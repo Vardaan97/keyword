@@ -12,6 +12,10 @@
 import { promises as fs } from 'fs'
 import path from 'path'
 
+// Re-export TokenExpiredError from the standalone errors module
+// (kept separate so it can be imported in client bundles without pulling in 'fs')
+export { TokenExpiredError } from './errors'
+
 // Token storage file path - stored in project root
 const TOKEN_FILE_PATH = path.join(process.cwd(), '.google-ads-tokens.json')
 
@@ -220,5 +224,38 @@ async function getStoredTokens(): Promise<StoredTokens | null> {
   } catch (error) {
     // File doesn't exist or is invalid
     return null
+  }
+}
+
+/**
+ * Update the GOOGLE_ADS_REFRESH_TOKEN in .env.local so it persists across restarts.
+ * Creates the file if it doesn't exist, updates the line if it does.
+ */
+export async function updateEnvFile(refreshToken: string): Promise<void> {
+  const envPath = path.join(process.cwd(), '.env.local')
+  const key = 'GOOGLE_ADS_REFRESH_TOKEN'
+
+  try {
+    let content = ''
+    try {
+      content = await fs.readFile(envPath, 'utf-8')
+    } catch {
+      // File doesn't exist yet, start fresh
+    }
+
+    const regex = new RegExp(`^${key}=.*$`, 'm')
+    const newLine = `${key}=${refreshToken}`
+
+    if (regex.test(content)) {
+      content = content.replace(regex, newLine)
+    } else {
+      content = content.trimEnd() + (content ? '\n' : '') + newLine + '\n'
+    }
+
+    await fs.writeFile(envPath, content, 'utf-8')
+    console.log('[TOKEN-STORAGE] Updated .env.local with new refresh token')
+  } catch (error) {
+    console.error('[TOKEN-STORAGE] Failed to update .env.local:', error)
+    // Non-fatal - runtime storage still works
   }
 }

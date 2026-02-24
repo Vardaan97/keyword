@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server'
 import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId, GOOGLE_ADS_ACCOUNTS, getAccountName, getRealAccountIds } from '@/lib/google-ads'
 import { getKeywordData, getRelatedKeywords, getKeywordsEverywhereConfig, CountryCode } from '@/lib/keywords-everywhere'
 import { getCachedKeywords, setCachedKeywords, getDatabaseStatus, UnifiedKeywordData, saveKeywordVolumes } from '@/lib/database'
-import { getRefreshToken } from '@/lib/token-storage'
+import { getRefreshToken, TokenExpiredError, clearTokens } from '@/lib/token-storage'
 import { KeywordIdea } from '@/types'
 import crypto from 'crypto'
 
@@ -465,6 +465,12 @@ export async function POST(request: NextRequest) {
             const errorMsg = googleError instanceof Error ? googleError.message : String(googleError)
             console.log('[STREAM] Google Ads error:', errorMsg)
 
+            // Clear bad tokens and include reAuthUrl for token expiry errors
+            if (googleError instanceof TokenExpiredError) {
+              await clearTokens()
+            }
+            const reAuthUrl = googleError instanceof TokenExpiredError ? googleError.reAuthUrl : undefined
+
             sendEvent('progress', {
               step: 'google_ads_failed',
               message: `Google Ads failed: ${errorMsg.substring(0, 100)}...`,
@@ -480,10 +486,11 @@ export async function POST(request: NextRequest) {
               })
 
               // Implement Keywords Everywhere fallback here if needed
-              // For now, return the error
+              // For now, return the error with reAuthUrl if applicable
               sendEvent('error', {
                 message: errorMsg,
-                source: 'google_ads'
+                source: 'google_ads',
+                ...(reAuthUrl ? { reAuthUrl } : {})
               })
               controller.close()
               return

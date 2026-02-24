@@ -1,5 +1,6 @@
 import { KeywordIdea, ApiErrorResponse } from '@/types'
 import { createClient } from '@supabase/supabase-js'
+import { TokenExpiredError } from '@/lib/errors'
 
 // Google Ads API v22 (latest as of December 2025)
 // v18 sunset, v19/v20/v21 still active, v22 is current
@@ -1236,17 +1237,16 @@ async function getAccessToken(config: GoogleAdsConfig): Promise<string> {
         const error = await response.json()
         console.error('[GOOGLE-ADS] Token error:', error)
 
-        // Provide specific guidance for token expiration/revocation
-        // These are non-retryable errors
+        // Handle token expiration/revocation — throw typed error
+        // NOTE: Token cleanup (clearTokens) is handled by the API route that catches this error,
+        // not here, because this file is pulled into the client bundle via store.ts and
+        // cannot reference Node.js modules like 'fs'.
         if (error.error === 'invalid_grant') {
-          const errorDesc = error.error_description || ''
-          if (errorDesc.includes('expired') || errorDesc.includes('revoked')) {
-            throw new Error(
-              'Token has been expired or revoked. ' +
-              'Please visit /api/auth/google-ads to get a new refresh token, ' +
-              'then update GOOGLE_ADS_REFRESH_TOKEN in your .env.local file and restart the server.'
-            )
-          }
+          console.log('[GOOGLE-ADS] invalid_grant detected')
+          cachedAccessToken = null
+          throw new TokenExpiredError(
+            error.error_description || 'Token expired or revoked'
+          )
         }
 
         throw new Error(error.error_description || 'Failed to get access token')

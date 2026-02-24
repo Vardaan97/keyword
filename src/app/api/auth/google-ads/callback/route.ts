@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { saveTokens } from '@/lib/token-storage'
+import { saveTokens, updateEnvFile } from '@/lib/token-storage'
 
 /**
  * Google Ads OAuth Callback Handler
@@ -32,8 +32,10 @@ export async function GET(request: NextRequest) {
     )
   }
 
-  // Verify CSRF state parameter
+  // Verify CSRF state parameter and extract returnTo
   const storedState = request.cookies.get('oauth_state')?.value
+  let returnTo = '/'
+
   if (!state || !storedState || state !== storedState) {
     console.warn('[OAUTH] State mismatch - possible CSRF attack or stale session')
     // Don't block entirely - the state cookie might have expired during slow auth
@@ -48,6 +50,19 @@ export async function GET(request: NextRequest) {
         }),
         { headers: { 'Content-Type': 'text/html' } }
       )
+    }
+  }
+
+  // Extract returnTo from state payload (base64url encoded JSON)
+  if (state) {
+    try {
+      const statePayload = JSON.parse(Buffer.from(state, 'base64url').toString())
+      if (statePayload.returnTo) {
+        returnTo = statePayload.returnTo
+      }
+    } catch {
+      // Legacy state format (plain hex) - just use default returnTo
+      console.log('[OAUTH] Could not parse state as JSON, using default returnTo')
     }
   }
 
@@ -162,6 +177,25 @@ export async function GET(request: NextRequest) {
       // Continue - user can still copy manually
     }
 
+    // Also persist to .env.local so token survives server restarts
+    try {
+      await updateEnvFile(refreshToken)
+      console.log('[OAUTH] Refresh token persisted to .env.local')
+    } catch (envError) {
+      console.error('[OAUTH] Failed to update .env.local:', envError)
+    }
+
+    // If returnTo is set, redirect back to the app with success indicator
+    if (returnTo && returnTo !== '/api/auth/google-ads/callback') {
+      const redirectUrl = new URL(returnTo, request.nextUrl.origin)
+      redirectUrl.searchParams.set('reauth', 'success')
+      const response = NextResponse.redirect(redirectUrl.toString())
+      // Clear the state cookie
+      response.cookies.delete('oauth_state')
+      return response
+    }
+
+    // Fallback: show the HTML success page
     return new NextResponse(
       generateHtmlResponse({
         success: true,

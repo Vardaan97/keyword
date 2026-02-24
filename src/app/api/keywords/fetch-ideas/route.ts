@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getKeywordIdeas, getGoogleAdsConfig, getDefaultCustomerId, GOOGLE_ADS_ACCOUNTS, getAccountName, getRealAccountIds, classifyError, markAccountQuotaExhausted } from '@/lib/google-ads'
 import { getKeywordData, getRelatedKeywords, getKeywordsEverywhereConfig, CountryCode } from '@/lib/keywords-everywhere'
 import { getCachedKeywords, setCachedKeywords, getDatabaseStatus, UnifiedKeywordData, saveKeywordVolumes } from '@/lib/database'
-import { getRefreshToken } from '@/lib/token-storage'
+import { getRefreshToken, TokenExpiredError, clearTokens } from '@/lib/token-storage'
 import { KeywordIdea, ApiResponse, EnhancedApiResponse, ApiErrorResponse } from '@/types'
 
 interface FetchIdeasRequest {
@@ -667,6 +667,56 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
 
   } catch (googleError) {
     console.error('[FETCH-IDEAS] Google Ads API error:', googleError)
+
+    // Handle TokenExpiredError specially — clear bad tokens and include reAuthUrl for the UI
+    if (googleError instanceof TokenExpiredError) {
+      console.log('[FETCH-IDEAS] Token expired — clearing tokens and returning reAuthUrl for UI')
+      await clearTokens()
+      const authError: ApiErrorResponse = {
+        type: 'AUTH',
+        message: googleError.message,
+        isRetryable: false,
+        accountId: customerId,
+        details: googleError.message,
+        reAuthUrl: googleError.reAuthUrl
+      }
+
+      // If source is explicitly 'google', don't fallback
+      if (source === 'google') {
+        return NextResponse.json({
+          success: false,
+          error: authError,
+          meta: { source: 'google_ads', processingTimeMs: Date.now() - startTime }
+        } as EnhancedApiResponse<KeywordIdea[]>, { status: 401 })
+      }
+
+      // Auto mode: try Keywords Everywhere as fallback, but still pass reAuthUrl
+      console.log('[FETCH-IDEAS] Auto mode - trying Keywords Everywhere fallback (token expired)...')
+      try {
+        const keywordIdeas = await fetchFromKeywordsEverywhere(seedKeywords, geoTarget)
+        const processingTimeMs = Date.now() - startTime
+        await cacheResults(keywordIdeas, 'keywords_everywhere')
+        return NextResponse.json({
+          success: true,
+          data: keywordIdeas,
+          meta: {
+            source: 'keywords_everywhere',
+            fallback: true,
+            googleError: googleError.message,
+            googleErrorType: 'AUTH',
+            reAuthUrl: googleError.reAuthUrl,
+            processingTimeMs
+          }
+        })
+      } catch (keError) {
+        // Both failed — return auth error with reAuthUrl
+        return NextResponse.json({
+          success: false,
+          error: { ...authError, message: `Token expired. Keywords Everywhere also failed: ${keError instanceof Error ? keError.message : String(keError)}` },
+          meta: { source: 'none', processingTimeMs: Date.now() - startTime }
+        } as EnhancedApiResponse<KeywordIdea[]>, { status: 401 })
+      }
+    }
 
     // Classify the error for structured response
     const structuredError = classifyError(googleError, customerId)

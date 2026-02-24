@@ -288,6 +288,25 @@ export default function Home() {
     isPaused: false
   })
 
+  // Re-auth state: shown when Google Ads token expires
+  const [reAuthUrl, setReAuthUrl] = useState<string | null>(null)
+  const [reAuthSuccess, setReAuthSuccess] = useState(false)
+
+  // On page load: detect ?reauth=success from OAuth callback redirect
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('reauth') === 'success') {
+      setReAuthSuccess(true)
+      setReAuthUrl(null) // Clear any existing re-auth banner
+      // Clean up URL
+      const url = new URL(window.location.href)
+      url.searchParams.delete('reauth')
+      window.history.replaceState({}, '', url.toString())
+      // Auto-dismiss after 5 seconds
+      setTimeout(() => setReAuthSuccess(false), 5000)
+    }
+  }, [])
+
   // Input mode: CSV upload or manual entry
   const [inputMode, setInputMode] = useState<'csv' | 'manual'>('csv')
 
@@ -719,7 +738,10 @@ export default function Home() {
                   console.log(`[STREAM] Complete: ${data.totalKeywords} keywords from ${dataSourceUsed}`)
                 }
               } else if (data.message && !data.step) {
-                // Error event
+                // Error event — check for auth re-auth URL
+                if (data.reAuthUrl) {
+                  setReAuthUrl(data.reAuthUrl)
+                }
                 streamError = data.message
                 console.error(`[STREAM] Error: ${data.message}`)
               }
@@ -1305,9 +1327,19 @@ export default function Home() {
       const keywordsResult = await keywordsResponse.json()
 
       if (!keywordsResult.success) {
+        // Check for auth error with re-auth URL
+        const authUrl = keywordsResult.error?.reAuthUrl || keywordsResult.meta?.reAuthUrl
+        if (authUrl && (keywordsResult.error?.type === 'AUTH' || keywordsResult.meta?.googleErrorType === 'AUTH')) {
+          setReAuthUrl(authUrl)
+        }
         const errorMsg = getErrorMessage(keywordsResult.error)
         updateProgress('fetch_keywords', 'error', errorMsg)
         throw new Error(errorMsg)
+      }
+
+      // If the response came via fallback due to auth error, still show re-auth banner
+      if (keywordsResult.meta?.reAuthUrl) {
+        setReAuthUrl(keywordsResult.meta.reAuthUrl)
       }
 
       const dataSourceUsed = keywordsResult.meta?.source || 'unknown'
@@ -1750,6 +1782,56 @@ export default function Home() {
           </div>
         </div>
       </header>
+
+      {/* Re-auth Banner: shown when Google Ads token expires */}
+      {reAuthUrl && (
+        <div className="sticky top-16 z-30 bg-amber-900/90 border-b border-amber-600 backdrop-blur-sm">
+          <div className="max-w-[1600px] mx-auto px-6 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <svg className="w-5 h-5 text-amber-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              </svg>
+              <span className="text-amber-200 text-sm font-medium">
+                Google Ads token expired. Re-authorize to continue using Google Ads data.
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <a
+                href={reAuthUrl}
+                className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-black text-sm font-bold rounded-lg transition-colors"
+              >
+                Re-authorize
+              </a>
+              <button
+                onClick={() => setReAuthUrl(null)}
+                className="p-1.5 text-amber-400 hover:text-amber-200 transition-colors"
+                aria-label="Dismiss"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Re-auth Success Toast */}
+      {reAuthSuccess && (
+        <div className="fixed top-20 right-6 z-50 animate-in slide-in-from-right fade-in duration-300">
+          <div className="bg-emerald-900/90 border border-emerald-600 rounded-xl px-5 py-3 flex items-center gap-3 shadow-2xl backdrop-blur-sm">
+            <svg className="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="text-emerald-200 text-sm font-medium">Google Ads re-authorized successfully!</span>
+            <button onClick={() => setReAuthSuccess(false)} className="text-emerald-400 hover:text-emerald-200 ml-2">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Prompt Editor Slide-out */}
       {showPromptEditor && (

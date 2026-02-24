@@ -229,6 +229,7 @@ export interface ApiErrorResponse {
   isRetryable: boolean
   accountId?: string   // affected account (for quota errors)
   details?: string     // additional context
+  reAuthUrl?: string   // URL to redirect user for re-authorization (AUTH errors)
 }
 
 // Enhanced API response with structured errors
@@ -240,6 +241,8 @@ export interface EnhancedApiResponse<T> {
     source?: string
     fallback?: boolean
     googleError?: string
+    googleErrorType?: string
+    reAuthUrl?: string  // URL for re-authorization when token expires
     cached?: boolean
     cacheAge?: number
     processingTimeMs?: number

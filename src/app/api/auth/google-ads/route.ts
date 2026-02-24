@@ -32,14 +32,19 @@ export async function GET(request: NextRequest) {
     }, { status: 500 })
   }
 
+  // Accept optional returnTo param for post-auth redirect
+  const returnTo = request.nextUrl.searchParams.get('returnTo') || '/'
+
   // Build callback URL - prefer explicit env var to avoid redirect_uri mismatch
   const protocol = request.headers.get('x-forwarded-proto') || 'http'
   const host = request.headers.get('host') || 'localhost:3005'
   const dynamicCallbackUrl = `${protocol}://${host}/api/auth/google-ads/callback`
   const callbackUrl = process.env.GOOGLE_ADS_OAUTH_CALLBACK_URL || dynamicCallbackUrl
 
-  // Generate CSRF state parameter
-  const state = crypto.randomBytes(32).toString('hex')
+  // Generate CSRF state parameter — encode returnTo alongside for retrieval in callback
+  const csrfToken = crypto.randomBytes(32).toString('hex')
+  const statePayload = JSON.stringify({ csrf: csrfToken, returnTo })
+  const state = Buffer.from(statePayload).toString('base64url')
 
   // Generate OAuth authorization URL
   const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
@@ -49,23 +54,10 @@ export async function GET(request: NextRequest) {
   authUrl.searchParams.set('scope', GOOGLE_OAUTH_SCOPES.join(' '))
   authUrl.searchParams.set('access_type', 'offline')  // Required for refresh token
   authUrl.searchParams.set('prompt', 'consent')       // Force consent to get new refresh token
-  authUrl.searchParams.set('state', state)            // CSRF protection
+  authUrl.searchParams.set('state', state)            // CSRF + returnTo
 
-  // Create response with state cookie
-  const response = NextResponse.json({
-    success: true,
-    message: 'Click the authorization URL to get a new refresh token',
-    instructions: [
-      '1. Click the authorization URL below',
-      '2. Log in with the Google account that has access to your Google Ads accounts',
-      '3. Grant access to Google Ads and profile information',
-      '4. You will be redirected back automatically',
-      '5. Your tokens will be saved automatically - no manual copying needed!'
-    ],
-    authorizationUrl: authUrl.toString(),
-    callbackUrl: callbackUrl,
-    note: 'Make sure this callback URL is added to your OAuth Authorized redirect URIs in Google Cloud Console'
-  })
+  // Create redirect response — go straight to Google OAuth consent
+  const response = NextResponse.redirect(authUrl.toString())
 
   // Set state cookie for CSRF verification (expires in 10 minutes)
   response.cookies.set('oauth_state', state, {
