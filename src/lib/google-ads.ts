@@ -586,7 +586,10 @@ export const GOOGLE_ADS_ACCOUNTS: GoogleAdsAccount[] = [
   { id: 'all-accounts', name: 'All Accounts', customerId: 'ALL', currency: 'INR' },  // Check all accounts
   { id: 'flexi', name: 'Flexi', customerId: '3515012934', currency: 'INR', priority: 3 },  // Primary focus - default
   { id: 'bouquet-inr', name: 'Bouquet INR', customerId: '6153038296', currency: 'INR', priority: 2 },
-  { id: 'bouquet-inr-2', name: 'Bouquet INR - 2', customerId: '6601080005', currency: 'INR', priority: 1 }
+  { id: 'bouquet-inr-2', name: 'Bouquet INR - 2', customerId: '6601080005', currency: 'INR', priority: 1 },
+  { id: 'koenig-dubai-inr', name: 'Koenig - Dubai INR', customerId: '8397587083', currency: 'INR', priority: 1 },
+  { id: 'webinar-promotions', name: 'Webinar Promotions', customerId: '1298612950', currency: 'INR', priority: 1 },
+  { id: 'youtube-account', name: 'YouTube Account', customerId: '3966084105', currency: 'INR', priority: 1 }
 ]
 
 // Get all real account IDs (excluding the "ALL" option)

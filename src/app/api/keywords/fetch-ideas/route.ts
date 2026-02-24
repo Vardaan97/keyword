@@ -674,8 +674,11 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       (googleError instanceof Error && googleError.name === 'TokenExpiredError')
 
     if (isTokenExpired) {
-      console.log('[FETCH-IDEAS] Token expired — clearing tokens and returning reAuthUrl for UI')
-      await clearTokens()
+      console.log('[FETCH-IDEAS] Token expired — returning reAuthUrl for UI (NOT clearing Supabase token)')
+      // NOTE: Do NOT call clearTokens() here. On Vercel serverless, a cold instance may
+      // fall back to the old env var token (which is expired), and clearing tokens would
+      // wipe the GOOD token from Supabase, causing cascading failures across all instances.
+      // The in-memory access token is already cleared in google-ads.ts getAccessToken().
       const reAuthUrl = googleError instanceof Error && 'reAuthUrl' in googleError
         ? (googleError as TokenExpiredError).reAuthUrl
         : '/api/auth/google-ads?returnTo=/'

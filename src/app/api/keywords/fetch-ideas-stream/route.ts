@@ -469,10 +469,8 @@ export async function POST(request: NextRequest) {
             const isTokenExpired = googleError instanceof TokenExpiredError ||
               (googleError instanceof Error && googleError.name === 'TokenExpiredError')
 
-            // Clear bad tokens and include reAuthUrl for token expiry errors
-            if (isTokenExpired) {
-              await clearTokens()
-            }
+            // NOTE: Do NOT call clearTokens() here — it wipes the Supabase token,
+            // causing cascading failures on Vercel serverless cold starts.
             const reAuthUrl = isTokenExpired && googleError instanceof Error && 'reAuthUrl' in googleError
               ? (googleError as TokenExpiredError).reAuthUrl
               : isTokenExpired ? '/api/auth/google-ads?returnTo=/' : undefined
@@ -522,9 +520,8 @@ export async function POST(request: NextRequest) {
           (error instanceof Error && error.name === 'TokenExpiredError')
         const reAuthUrl = isTokenExpired ? '/api/auth/google-ads?returnTo=/' : undefined
 
-        if (isTokenExpired) {
-          try { await clearTokens() } catch { /* ignore */ }
-        }
+        // NOTE: Do NOT call clearTokens() here — it wipes the Supabase token,
+        // causing cascading failures on Vercel serverless cold starts.
 
         sendEvent('error', {
           message: errorMsg,
