@@ -2,15 +2,18 @@
  * Runtime Token Storage for Google Ads OAuth
  *
  * This module provides a way to store and retrieve OAuth tokens at runtime
- * without requiring a server restart. Tokens are stored in a JSON file.
+ * without requiring a server restart.
  *
  * Priority order for refresh token:
- * 1. Runtime token file (can be updated without restart)
- * 2. Environment variable (.env.local)
+ * 1. In-memory cache (fastest, same serverless instance)
+ * 2. Supabase (persistent across Vercel serverless instances)
+ * 3. Runtime file (local dev only — ephemeral on Vercel)
+ * 4. Environment variable (fallback)
  */
 
 import { promises as fs } from 'fs'
 import path from 'path'
+import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
 // Re-export TokenExpiredError from the standalone errors module
 // (kept separate so it can be imported in client bundles without pulling in 'fs')
@@ -18,6 +21,88 @@ export { TokenExpiredError } from './errors'
 
 // Token storage file path - stored in project root
 const TOKEN_FILE_PATH = path.join(process.cwd(), '.google-ads-tokens.json')
+
+// Supabase key for storing the OAuth token (uses keyword_cache table)
+const SUPABASE_TOKEN_KEY = '__system__oauth_refresh_token'
+
+/**
+ * Get a Supabase client with service role key (bypasses RLS)
+ * Returns null if Supabase is not configured
+ */
+function getSupabaseAdmin(): SupabaseClient | null {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  if (!url || !key) return null
+  return createClient(url, key)
+}
+
+/**
+ * Save refresh token to Supabase for persistence across serverless instances
+ */
+async function saveTokenToSupabase(refreshToken: string, userEmail?: string): Promise<void> {
+  const supabase = getSupabaseAdmin()
+  if (!supabase) return
+
+  try {
+    const { error } = await supabase
+      .from('keyword_cache')
+      .upsert({
+        cache_key: SUPABASE_TOKEN_KEY,
+        keywords: [{ refreshToken, updatedBy: userEmail || 'unknown', updatedAt: new Date().toISOString() }],
+        expires_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'cache_key' })
+
+    if (error) {
+      console.error('[TOKEN-STORAGE] Supabase save error:', error.message)
+    } else {
+      console.log('[TOKEN-STORAGE] Refresh token saved to Supabase')
+    }
+  } catch (err) {
+    console.error('[TOKEN-STORAGE] Supabase save failed:', err)
+  }
+}
+
+/**
+ * Retrieve refresh token from Supabase
+ */
+async function getTokenFromSupabase(): Promise<string | null> {
+  const supabase = getSupabaseAdmin()
+  if (!supabase) return null
+
+  try {
+    const { data, error } = await supabase
+      .from('keyword_cache')
+      .select('keywords')
+      .eq('cache_key', SUPABASE_TOKEN_KEY)
+      .single()
+
+    if (error || !data?.keywords?.[0]?.refreshToken) return null
+
+    console.log('[TOKEN-STORAGE] Using refresh token from Supabase')
+    return data.keywords[0].refreshToken
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Clear refresh token from Supabase
+ */
+async function clearTokenFromSupabase(): Promise<void> {
+  const supabase = getSupabaseAdmin()
+  if (!supabase) return
+
+  try {
+    await supabase
+      .from('keyword_cache')
+      .delete()
+      .eq('cache_key', SUPABASE_TOKEN_KEY)
+    console.log('[TOKEN-STORAGE] Cleared token from Supabase')
+  } catch {
+    // Ignore
+  }
+}
 
 interface StoredTokens {
   refreshToken: string
@@ -33,17 +118,25 @@ let tokenCache: StoredTokens | null = null
 
 /**
  * Get the current refresh token
- * Prioritizes runtime storage over environment variable
+ * Priority: in-memory → file → Supabase → env var
  */
 export async function getRefreshToken(): Promise<string> {
-  // Try runtime storage first
+  // 1. Try runtime file storage (fast, works locally)
   const storedTokens = await getStoredTokens()
   if (storedTokens?.refreshToken) {
     console.log('[TOKEN-STORAGE] Using refresh token from runtime storage')
     return storedTokens.refreshToken
   }
 
-  // Fall back to environment variable
+  // 2. Try Supabase (persistent across Vercel serverless instances)
+  const supabaseToken = await getTokenFromSupabase()
+  if (supabaseToken) {
+    // Also cache in memory for subsequent calls in this instance
+    tokenCache = { refreshToken: supabaseToken, updatedAt: new Date().toISOString() }
+    return supabaseToken
+  }
+
+  // 3. Fall back to environment variable
   const envToken = process.env.GOOGLE_ADS_REFRESH_TOKEN
   if (envToken) {
     console.log('[TOKEN-STORAGE] Using refresh token from environment variable')
@@ -69,7 +162,7 @@ export async function getCachedAccessToken(): Promise<string | null> {
 }
 
 /**
- * Save tokens to runtime storage
+ * Save tokens to runtime storage + Supabase (for Vercel persistence)
  */
 export async function saveTokens(tokens: {
   refreshToken: string
@@ -87,14 +180,24 @@ export async function saveTokens(tokens: {
     updatedBy: tokens.userEmail
   }
 
+  // Always update in-memory cache
+  tokenCache = storedTokens
+
+  // Also update process.env so other functions in this instance see it immediately
+  process.env.GOOGLE_ADS_REFRESH_TOKEN = tokens.refreshToken
+
+  // Save to file (works locally, may fail on Vercel — that's OK)
   try {
     await fs.writeFile(TOKEN_FILE_PATH, JSON.stringify(storedTokens, null, 2), 'utf-8')
-    tokenCache = storedTokens
-    console.log('[TOKEN-STORAGE] Tokens saved successfully')
+    console.log('[TOKEN-STORAGE] Tokens saved to file')
   } catch (error) {
-    console.error('[TOKEN-STORAGE] Failed to save tokens:', error)
-    throw new Error('Failed to save OAuth tokens')
+    console.log('[TOKEN-STORAGE] File save skipped (read-only filesystem, expected on Vercel)')
   }
+
+  // Save to Supabase (persists across Vercel serverless instances)
+  await saveTokenToSupabase(tokens.refreshToken, tokens.userEmail)
+
+  console.log('[TOKEN-STORAGE] Tokens saved successfully')
 }
 
 /**
@@ -129,14 +232,19 @@ export async function updateAccessToken(accessToken: string, expiresIn: number):
  * Clear stored tokens (for logout/revoke)
  */
 export async function clearTokens(): Promise<void> {
+  tokenCache = null
+
+  // Clear file
   try {
     await fs.unlink(TOKEN_FILE_PATH)
-    tokenCache = null
-    console.log('[TOKEN-STORAGE] Tokens cleared')
-  } catch (error) {
+  } catch {
     // File might not exist, that's OK
-    tokenCache = null
   }
+
+  // Clear from Supabase
+  await clearTokenFromSupabase()
+
+  console.log('[TOKEN-STORAGE] Tokens cleared')
 }
 
 /**
@@ -192,6 +300,15 @@ export async function getTokenStatus(): Promise<{
       source: 'runtime',
       updatedAt: storedTokens.updatedAt,
       updatedBy: storedTokens.updatedBy
+    }
+  }
+
+  // Check Supabase
+  const supabaseToken = await getTokenFromSupabase()
+  if (supabaseToken) {
+    return {
+      hasToken: true,
+      source: 'runtime'
     }
   }
 
