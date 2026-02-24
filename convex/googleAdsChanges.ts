@@ -3,45 +3,74 @@ import { mutation, query, internalMutation, internalQuery } from "./_generated/s
 import { Id } from "./_generated/dataModel";
 
 // ============================================
-// Change Event CRUD Operations
+// Change Event CRUD Operations (Enhanced Schema)
 // ============================================
+
+// Enhanced changed field validator
+const changedFieldValidator = v.object({
+  field: v.string(),
+  category: v.string(),         // budget, bidding, status, targeting, schedule, creative, metadata
+  oldValue: v.optional(v.string()),
+  newValue: v.optional(v.string()),
+  oldValueRaw: v.optional(v.any()),  // Original type preserved
+  newValueRaw: v.optional(v.any()),
+});
+
+// Full change event validator
+const changeEventValidator = {
+  // Identity
+  changeId: v.string(),           // Unique change event ID from Google
+  customerId: v.string(),
+  accountName: v.string(),
+
+  // Resource
+  resourceType: v.string(),
+  resourceId: v.string(),
+  resourceName: v.string(),
+  parentResourceId: v.optional(v.string()),
+  parentResourceName: v.optional(v.string()),
+
+  // Change Details
+  changeType: v.string(),
+  changedAt: v.number(),
+  detectedAt: v.number(),
+
+  // Attribution
+  userEmail: v.optional(v.string()),
+  clientType: v.string(),
+  clientTypeFriendly: v.string(),
+  isAutomated: v.boolean(),
+
+  // Field-Level Changes
+  changedFields: v.array(changedFieldValidator),
+
+  // AI-Ready Summary
+  summary: v.string(),
+  impactCategory: v.string(),     // "high", "medium", "low"
+  tags: v.array(v.string()),
+
+  // Correlation
+  batchId: v.optional(v.string()),
+  experimentId: v.optional(v.string()),
+  algorithmId: v.optional(v.string()),
+};
 
 /**
  * Upsert a change event (insert or update if exists)
- * Uses resourceId + changedAt as unique key
+ * Uses changeId as unique key (from Google's change event ID)
  */
 export const upsert = mutation({
-  args: {
-    customerId: v.string(),
-    resourceType: v.string(),
-    resourceId: v.string(),
-    resourceName: v.string(),
-    changeType: v.string(),
-    changedAt: v.number(),
-    detectedAt: v.number(),
-    userEmail: v.optional(v.string()),
-    clientType: v.optional(v.string()),
-    changedFields: v.array(v.object({
-      field: v.string(),
-      category: v.string(),
-      oldValue: v.optional(v.string()),
-      newValue: v.optional(v.string()),
-    })),
-    summary: v.string(),
-  },
+  args: changeEventValidator,
   handler: async (ctx, args) => {
-    // Check if this change already exists
+    // Check if this change already exists by changeId
     const existing = await ctx.db
       .query("googleAdsChanges")
-      .withIndex("by_resourceId", (q) => q.eq("resourceId", args.resourceId))
-      .filter((q) => q.eq(q.field("changedAt"), args.changedAt))
+      .withIndex("by_changeId", (q) => q.eq("changeId", args.changeId))
       .first();
 
     if (existing) {
       // Update existing record
-      await ctx.db.patch(existing._id, {
-        ...args,
-      });
+      await ctx.db.patch(existing._id, { ...args });
       return existing._id;
     }
 
@@ -52,46 +81,67 @@ export const upsert = mutation({
 
 /**
  * Bulk insert changes (for efficient syncing)
+ * Deduplicates by changeId
  */
 export const bulkInsert = mutation({
   args: {
-    changes: v.array(v.object({
-      customerId: v.string(),
-      resourceType: v.string(),
-      resourceId: v.string(),
-      resourceName: v.string(),
-      changeType: v.string(),
-      changedAt: v.number(),
-      detectedAt: v.number(),
-      userEmail: v.optional(v.string()),
-      clientType: v.optional(v.string()),
-      changedFields: v.array(v.object({
-        field: v.string(),
-        category: v.string(),
-        oldValue: v.optional(v.string()),
-        newValue: v.optional(v.string()),
-      })),
-      summary: v.string(),
-    })),
+    changes: v.array(v.object(changeEventValidator)),
   },
   handler: async (ctx, args) => {
     const insertedIds: Id<"googleAdsChanges">[] = [];
+    const skippedCount = { duplicates: 0 };
 
     for (const change of args.changes) {
-      // Check for existing
+      // Check for existing by changeId
       const existing = await ctx.db
         .query("googleAdsChanges")
-        .withIndex("by_resourceId", (q) => q.eq("resourceId", change.resourceId))
-        .filter((q) => q.eq(q.field("changedAt"), change.changedAt))
+        .withIndex("by_changeId", (q) => q.eq("changeId", change.changeId))
         .first();
 
       if (!existing) {
         const id = await ctx.db.insert("googleAdsChanges", change);
         insertedIds.push(id);
+      } else {
+        skippedCount.duplicates++;
       }
     }
 
-    return { inserted: insertedIds.length, total: args.changes.length };
+    return {
+      inserted: insertedIds.length,
+      duplicates: skippedCount.duplicates,
+      total: args.changes.length
+    };
+  },
+});
+
+/**
+ * Bulk upsert changes (insert or update)
+ * More permissive - updates existing records
+ */
+export const bulkUpsert = mutation({
+  args: {
+    changes: v.array(v.object(changeEventValidator)),
+  },
+  handler: async (ctx, args) => {
+    let inserted = 0;
+    let updated = 0;
+
+    for (const change of args.changes) {
+      const existing = await ctx.db
+        .query("googleAdsChanges")
+        .withIndex("by_changeId", (q) => q.eq("changeId", change.changeId))
+        .first();
+
+      if (existing) {
+        await ctx.db.patch(existing._id, { ...change });
+        updated++;
+      } else {
+        await ctx.db.insert("googleAdsChanges", change);
+        inserted++;
+      }
+    }
+
+    return { inserted, updated, total: args.changes.length };
   },
 });
 
@@ -203,7 +253,119 @@ export const getRecent = query({
 });
 
 /**
- * Get change statistics
+ * Get changes by impact category
+ */
+export const getByImpactCategory = query({
+  args: {
+    impactCategory: v.string(), // "high", "medium", "low"
+    customerId: v.optional(v.string()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = args.limit || 100;
+
+    let changes = await ctx.db
+      .query("googleAdsChanges")
+      .withIndex("by_impactCategory", (q) => q.eq("impactCategory", args.impactCategory))
+      .order("desc")
+      .take(limit * 2);
+
+    if (args.customerId) {
+      changes = changes.filter((c) => c.customerId === args.customerId);
+    }
+
+    return changes.slice(0, limit);
+  },
+});
+
+/**
+ * Get changes by user email
+ */
+export const getByUserEmail = query({
+  args: {
+    userEmail: v.string(),
+    limit: v.optional(v.number()),
+    days: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = args.limit || 100;
+    const days = args.days || 30;
+    const startDate = Date.now() - days * 24 * 60 * 60 * 1000;
+
+    const changes = await ctx.db
+      .query("googleAdsChanges")
+      .withIndex("by_userEmail", (q) => q.eq("userEmail", args.userEmail).gte("changedAt", startDate))
+      .order("desc")
+      .take(limit);
+
+    return changes;
+  },
+});
+
+/**
+ * Get changes by automation status
+ */
+export const getByAutomationStatus = query({
+  args: {
+    isAutomated: v.boolean(),
+    customerId: v.optional(v.string()),
+    limit: v.optional(v.number()),
+    days: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = args.limit || 100;
+    const days = args.days || 7;
+    const startDate = Date.now() - days * 24 * 60 * 60 * 1000;
+
+    let changes = await ctx.db
+      .query("googleAdsChanges")
+      .withIndex("by_changedAt", (q) => q.gte("changedAt", startDate))
+      .filter((q) => q.eq(q.field("isAutomated"), args.isAutomated))
+      .order("desc")
+      .take(limit * 2);
+
+    if (args.customerId) {
+      changes = changes.filter((c) => c.customerId === args.customerId);
+    }
+
+    return changes.slice(0, limit);
+  },
+});
+
+/**
+ * Search changes by summary text
+ */
+export const searchChanges = query({
+  args: {
+    searchText: v.string(),
+    customerId: v.optional(v.string()),
+    resourceType: v.optional(v.string()),
+    changeType: v.optional(v.string()),
+    impactCategory: v.optional(v.string()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = args.limit || 50;
+
+    // Build the search query with filters
+    let searchQuery = ctx.db
+      .query("googleAdsChanges")
+      .withSearchIndex("search_changes", (q) => {
+        let search = q.search("summary", args.searchText);
+        if (args.customerId) search = search.eq("customerId", args.customerId);
+        if (args.resourceType) search = search.eq("resourceType", args.resourceType);
+        if (args.changeType) search = search.eq("changeType", args.changeType);
+        if (args.impactCategory) search = search.eq("impactCategory", args.impactCategory);
+        return search;
+      });
+
+    const changes = await searchQuery.take(limit);
+    return changes;
+  },
+});
+
+/**
+ * Get change statistics (enhanced with new fields)
  */
 export const getStatistics = query({
   args: {
@@ -237,6 +399,11 @@ export const getStatistics = query({
     const byClientType: Record<string, number> = {};
     const byCategory: Record<string, number> = {};
     const byDay: Record<string, number> = {};
+    const byImpactCategory: Record<string, number> = {};
+    const byUser: Record<string, number> = {};
+    const byAccount: Record<string, number> = {};
+    let automatedCount = 0;
+    let manualCount = 0;
 
     for (const change of changes) {
       // By resource type
@@ -257,6 +424,26 @@ export const getStatistics = query({
       // By day
       const day = new Date(change.changedAt).toISOString().split("T")[0];
       byDay[day] = (byDay[day] || 0) + 1;
+
+      // By impact category (new)
+      if (change.impactCategory) {
+        byImpactCategory[change.impactCategory] = (byImpactCategory[change.impactCategory] || 0) + 1;
+      }
+
+      // By user (new)
+      const user = change.userEmail || "System/Unknown";
+      byUser[user] = (byUser[user] || 0) + 1;
+
+      // By account (new)
+      const account = change.accountName || change.customerId;
+      byAccount[account] = (byAccount[account] || 0) + 1;
+
+      // Automated vs manual (new)
+      if (change.isAutomated) {
+        automatedCount++;
+      } else {
+        manualCount++;
+      }
     }
 
     return {
@@ -266,6 +453,14 @@ export const getStatistics = query({
       byClientType,
       byCategory,
       byDay,
+      // New fields
+      byImpactCategory,
+      byUser,
+      byAccount,
+      automatedVsManual: {
+        automated: automatedCount,
+        manual: manualCount,
+      },
     };
   },
 });

@@ -378,35 +378,226 @@ export default defineSchema({
 
   // Google Ads Change Events - tracks all modifications to campaigns, ad groups, keywords, etc.
   // Data from Google Ads Change Event API (30-day lookback max)
+  // Enhanced for AI analysis and comprehensive tracking
   googleAdsChanges: defineTable({
-    customerId: v.string(),
-    resourceType: v.string(), // CAMPAIGN, AD_GROUP, AD, KEYWORD, AD_GROUP_BID_MODIFIER, etc.
+    // Identity
+    changeId: v.string(),           // Unique change event ID from Google
+    customerId: v.string(),         // Google Ads customer ID
+    accountName: v.string(),        // Human-readable account name (Flexi, Bouquet INR, etc.)
+
+    // Resource
+    resourceType: v.string(),       // CAMPAIGN, AD_GROUP, AD, AD_GROUP_CRITERION, etc.
     resourceId: v.string(),
-    resourceName: v.string(), // Full resource name from Google
-    changeType: v.string(), // CREATE, UPDATE, REMOVE
-    changedAt: v.number(), // Google's timestamp (when change was made)
-    detectedAt: v.number(), // Our sync timestamp (when we detected it)
+    resourceName: v.string(),       // Human-readable name (campaign/ad group/keyword name)
+    parentResourceId: v.optional(v.string()),  // Parent campaign ID (for ad groups/keywords)
+    parentResourceName: v.optional(v.string()), // Parent campaign name
 
-    // Who made the change
+    // Change Details
+    changeType: v.string(),         // CREATE, UPDATE, REMOVE
+    changedAt: v.number(),          // Google's timestamp (when change was made)
+    detectedAt: v.number(),         // Our sync timestamp (when we detected it)
+
+    // Attribution (WHO made the change)
     userEmail: v.optional(v.string()),
-    clientType: v.optional(v.string()), // GOOGLE_ADS_WEB_CLIENT, GOOGLE_ADS_API, GOOGLE_ADS_EDITOR, etc.
+    clientType: v.string(),         // GOOGLE_ADS_WEB_CLIENT, GOOGLE_ADS_API, GOOGLE_ADS_EDITOR, SCRIPTS, etc.
+    clientTypeFriendly: v.string(), // "Web Interface", "API", "Google Ads Editor", "Scripts", etc.
+    isAutomated: v.boolean(),       // True if by rules/scripts/API (not manual web interface)
 
-    // What changed - array of field-level changes
+    // Field-Level Changes
     changedFields: v.array(v.object({
       field: v.string(),
-      category: v.string(), // budget, bidding, targeting, status, schedule, creative, other
+      category: v.string(),         // budget, bidding, status, targeting, schedule, creative, metadata
       oldValue: v.optional(v.string()),
       newValue: v.optional(v.string()),
+      oldValueRaw: v.optional(v.any()),  // Original type preserved (number, object, etc.)
+      newValueRaw: v.optional(v.any()),
     })),
 
-    // Human-readable summary for UI display
-    summary: v.string(), // e.g., "Budget changed: ₹5,000 → ₹8,000"
+    // AI-Ready Summary
+    summary: v.string(),            // Human-readable description: "Budget changed: ₹5,000 → ₹8,000"
+    impactCategory: v.string(),     // "high", "medium", "low" - for prioritization
+    tags: v.array(v.string()),      // Searchable tags: ["budget", "increase", "campaign"]
+
+    // Correlation
+    batchId: v.optional(v.string()),     // Group related changes made together
+    experimentId: v.optional(v.string()), // Link to experiment if applicable
+    algorithmId: v.optional(v.string()),  // Link to automation algorithm that made this change
   })
     .index("by_customerId", ["customerId"])
     .index("by_resourceType", ["resourceType"])
     .index("by_changedAt", ["changedAt"])
     .index("by_customerId_changedAt", ["customerId", "changedAt"])
-    .index("by_resourceId", ["resourceId"]),
+    .index("by_resourceId", ["resourceId"])
+    .index("by_changeId", ["changeId"])
+    .index("by_userEmail", ["userEmail", "changedAt"])
+    .index("by_clientType", ["clientType", "changedAt"])
+    .index("by_impactCategory", ["impactCategory", "changedAt"])
+    .index("by_experimentId", ["experimentId"])
+    .index("by_algorithmId", ["algorithmId"])
+    .index("by_batchId", ["batchId"])
+    .searchIndex("search_changes", {
+      searchField: "summary",
+      filterFields: ["customerId", "resourceType", "changeType", "impactCategory"]
+    }),
+
+  // Daily Snapshots - captures full account state daily for historical comparison
+  // Different from googleAdsCampaignSnapshots which is per-campaign
+  googleAdsDailySnapshots: defineTable({
+    snapshotDate: v.string(),       // YYYY-MM-DD
+    customerId: v.string(),
+    accountName: v.string(),
+
+    // Aggregated Counts
+    campaignCount: v.number(),
+    adGroupCount: v.number(),
+    keywordCount: v.number(),
+    adCount: v.number(),
+
+    // Status Breakdown
+    activeCampaigns: v.number(),
+    pausedCampaigns: v.number(),
+    enabledAdGroups: v.number(),
+    enabledKeywords: v.number(),
+
+    // Budget Summary
+    totalDailyBudgetMicros: v.number(),   // In micros
+    totalDailyBudgetFormatted: v.string(), // e.g., "₹45,000"
+
+    // Performance (that day's metrics)
+    impressions: v.number(),
+    clicks: v.number(),
+    costMicros: v.number(),
+    conversions: v.number(),
+    conversionValue: v.number(),
+
+    // Detailed Snapshots (arrays for each entity type)
+    campaigns: v.array(v.object({
+      id: v.string(),
+      name: v.string(),
+      status: v.string(),
+      type: v.string(),             // SEARCH, PERFORMANCE_MAX, etc.
+      budgetMicros: v.number(),
+      biddingStrategy: v.string(),
+      targetCpaMicros: v.optional(v.number()),
+      targetRoas: v.optional(v.number()),
+    })),
+
+    // State hash for quick comparison between days
+    stateHash: v.string(),
+
+    // Metadata
+    createdAt: v.number(),
+  })
+    .index("by_date_customer", ["snapshotDate", "customerId"])
+    .index("by_customerId", ["customerId"])
+    .index("by_snapshotDate", ["snapshotDate"]),
+
+  // Conversions/Leads - tracks all conversions with source attribution
+  googleAdsConversions: defineTable({
+    // Identity
+    conversionId: v.string(),       // Unique conversion ID
+    customerId: v.string(),
+    accountName: v.string(),
+
+    // Attribution
+    campaignId: v.string(),
+    campaignName: v.string(),
+    adGroupId: v.optional(v.string()),
+    adGroupName: v.optional(v.string()),
+    keywordId: v.optional(v.string()),
+    keywordText: v.optional(v.string()),
+
+    // Conversion Details
+    conversionAction: v.string(),   // "Lead form", "Phone call", "Website", etc.
+    conversionActionId: v.string(),
+    conversionName: v.string(),
+    conversionValue: v.number(),    // In account currency
+    conversionDate: v.string(),     // YYYY-MM-DD
+    conversionDateTime: v.number(), // Timestamp
+
+    // Click Data
+    gclid: v.optional(v.string()),
+    clickDate: v.optional(v.string()),
+    daysToConversion: v.optional(v.number()),
+
+    // Lead Details (if lead form submission)
+    leadFormId: v.optional(v.string()),
+    leadFormName: v.optional(v.string()),
+    leadData: v.optional(v.object({
+      name: v.optional(v.string()),
+      email: v.optional(v.string()),
+      phone: v.optional(v.string()),
+      company: v.optional(v.string()),
+      customFields: v.optional(v.any()),
+    })),
+
+    // Enrichment (from PDL or other sources)
+    enrichedAt: v.optional(v.number()),
+    enrichmentSource: v.optional(v.string()),
+    enrichmentData: v.optional(v.any()),
+
+    // Metadata
+    createdAt: v.number(),
+    syncedAt: v.number(),
+  })
+    .index("by_customerId", ["customerId"])
+    .index("by_customerId_date", ["customerId", "conversionDate"])
+    .index("by_campaignId", ["campaignId", "conversionDate"])
+    .index("by_gclid", ["gclid"])
+    .index("by_conversionAction", ["conversionAction", "conversionDate"])
+    .index("by_conversionId", ["conversionId"]),
+
+  // Algorithm Runs - tracks when automated algorithms ran and what they changed
+  // Links changes back to the algorithm that made them for input/output tracking
+  googleAdsAlgorithmRuns: defineTable({
+    algorithmId: v.string(),        // e.g., "tcpa_bidding", "bid_optimizer_v2"
+    algorithmName: v.string(),      // Human-readable name
+    runId: v.string(),              // Unique execution ID
+
+    // Timing
+    startedAt: v.number(),
+    completedAt: v.optional(v.number()),
+    status: v.string(),             // "running", "completed", "failed", "partial"
+
+    // Scope
+    customerId: v.string(),
+    accountName: v.string(),
+    targetCampaigns: v.array(v.string()), // Campaign IDs targeted
+
+    // Input Parameters
+    inputParams: v.optional(v.any()),    // Algorithm-specific config/thresholds
+
+    // Output
+    changesProposed: v.number(),
+    changesApplied: v.number(),
+    changeIds: v.array(v.string()), // Links to googleAdsChanges.changeId
+
+    // Performance Comparison (before vs after)
+    beforeMetrics: v.optional(v.object({
+      dateRange: v.string(),        // "2026-01-15 to 2026-01-22"
+      impressions: v.number(),
+      clicks: v.number(),
+      costMicros: v.number(),
+      conversions: v.number(),
+      conversionValue: v.number(),
+    })),
+    afterMetrics: v.optional(v.object({
+      dateRange: v.string(),
+      impressions: v.number(),
+      clicks: v.number(),
+      costMicros: v.number(),
+      conversions: v.number(),
+      conversionValue: v.number(),
+    })),
+
+    // Notes and results
+    notes: v.optional(v.string()),
+    resultSummary: v.optional(v.string()),
+  })
+    .index("by_algorithmId", ["algorithmId", "startedAt"])
+    .index("by_customerId", ["customerId", "startedAt"])
+    .index("by_runId", ["runId"])
+    .index("by_status", ["status"]),
 
   // Campaign Snapshots - full state at each sync for our own change detection
   // Used as fallback when Change Event API data is incomplete

@@ -1,6 +1,8 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { ChangeDetailModal } from '@/components/changes/ChangeDetailModal'
+import { Pagination } from '@/components/changes/Pagination'
 
 interface ChangedField {
   field: string
@@ -75,6 +77,13 @@ export default function ChangesPage() {
   const [resourceTypeFilter, setResourceTypeFilter] = useState<string>('all')
   const [changeTypeFilter, setChangeTypeFilter] = useState<string>('all')
 
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1)
+  const [pageSize, setPageSize] = useState(50)
+
+  // Modal state
+  const [selectedChange, setSelectedChange] = useState<ChangeEvent | null>(null)
+
   const fetchData = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -110,6 +119,29 @@ export default function ChangesPage() {
   useEffect(() => {
     fetchData()
   }, [fetchData])
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [days, allAccounts, resourceTypeFilter, changeTypeFilter])
+
+  // Calculate paginated data
+  const paginatedChanges = useMemo(() => {
+    if (!data?.changes) return []
+    const startIndex = (currentPage - 1) * pageSize
+    return data.changes.slice(startIndex, startIndex + pageSize)
+  }, [data?.changes, currentPage, pageSize])
+
+  const totalPages = useMemo(() => {
+    if (!data?.changes) return 1
+    return Math.ceil(data.changes.length / pageSize)
+  }, [data?.changes, pageSize])
+
+  // Handle page size change
+  const handlePageSizeChange = (newSize: number) => {
+    setPageSize(newSize)
+    setCurrentPage(1) // Reset to first page when changing page size
+  }
 
   // Format date
   const formatDate = (timestamp: number) => {
@@ -297,7 +329,7 @@ export default function ChangesPage() {
           </h2>
           {data && (
             <span className="text-sm text-[var(--text-muted)]">
-              Showing {data.changes.length} of {data.unfilteredTotal} changes
+              Page {currentPage} of {totalPages} ({data.changes.length.toLocaleString()} changes)
             </span>
           )}
         </div>
@@ -314,8 +346,12 @@ export default function ChangesPage() {
               </div>
             </div>
           ) : data && data.changes.length > 0 ? (
-            data.changes.map((change, index) => (
-              <div key={`${change.resourceId}-${change.changedAt}-${index}`} className="px-6 py-4 hover:bg-[var(--bg-hover)] transition-colors">
+            paginatedChanges.map((change, index) => (
+              <div
+                key={`${change.resourceId}-${change.changedAt}-${index}`}
+                className="px-6 py-4 hover:bg-[var(--bg-hover)] transition-colors cursor-pointer group"
+                onClick={() => setSelectedChange(change)}
+              >
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     {/* Summary */}
@@ -373,14 +409,20 @@ export default function ChangesPage() {
                     )}
                   </div>
 
-                  {/* Timestamp */}
-                  <div className="text-right flex-shrink-0">
+                  {/* Timestamp and expand indicator */}
+                  <div className="text-right flex-shrink-0 flex flex-col items-end">
                     <p className="text-sm text-[var(--text-secondary)]">
                       {formatRelativeTime(change.changedAt)}
                     </p>
                     <p className="text-xs text-[var(--text-muted)]">
                       {formatDate(change.changedAt)}
                     </p>
+                    <span className="text-xs text-[var(--accent-electric)] opacity-0 group-hover:opacity-100 transition-opacity mt-1 flex items-center gap-1">
+                      View details
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </span>
                   </div>
                 </div>
               </div>
@@ -399,6 +441,18 @@ export default function ChangesPage() {
             </div>
           )}
         </div>
+
+        {/* Pagination */}
+        {data && data.changes.length > 0 && (
+          <Pagination
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalItems={data.changes.length}
+            pageSize={pageSize}
+            onPageChange={setCurrentPage}
+            onPageSizeChange={handlePageSizeChange}
+          />
+        )}
       </div>
 
       {/* Account breakdown */}
@@ -414,6 +468,14 @@ export default function ChangesPage() {
             ))}
           </div>
         </div>
+      )}
+
+      {/* Change Detail Modal */}
+      {selectedChange && (
+        <ChangeDetailModal
+          change={selectedChange}
+          onClose={() => setSelectedChange(null)}
+        />
       )}
     </div>
   )

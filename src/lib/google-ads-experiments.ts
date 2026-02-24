@@ -8,6 +8,7 @@
  */
 
 import { getGoogleAdsConfig, GOOGLE_ADS_ACCOUNTS, getAccountName } from './google-ads'
+import { getRefreshToken } from './token-storage'
 
 // Google Ads API v22
 const GOOGLE_ADS_API_VERSION = 'v22'
@@ -77,7 +78,9 @@ export interface ExperimentsResponse {
 let cachedAccessToken: { token: string; expiresAt: number } | null = null
 
 async function getAccessToken(): Promise<string> {
-  const config = getGoogleAdsConfig()
+  // Get refresh token from runtime storage (priority) or env var
+  const refreshToken = await getRefreshToken()
+  const config = getGoogleAdsConfig(refreshToken)
 
   // Check if we have a valid cached token (with 5 minute buffer)
   if (cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 5 * 60 * 1000) {
@@ -85,6 +88,7 @@ async function getAccessToken(): Promise<string> {
   }
 
   const tokenUrl = 'https://oauth2.googleapis.com/token'
+  console.log('[GOOGLE-ADS-EXPERIMENTS] Requesting new access token...')
 
   const response = await fetch(tokenUrl, {
     method: 'POST',
@@ -101,6 +105,12 @@ async function getAccessToken(): Promise<string> {
 
   if (!response.ok) {
     const error = await response.json()
+    console.error('[GOOGLE-ADS-EXPERIMENTS] Token error:', error)
+
+    if (error.error === 'invalid_grant') {
+      throw new Error('Token expired or revoked. Re-authorize at /api/auth/google-ads')
+    }
+
     throw new Error(error.error_description || 'Failed to get access token')
   }
 
@@ -183,7 +193,8 @@ async function executeQuery(
   customerId: string,
   query: string
 ): Promise<Record<string, unknown>[]> {
-  const config = getGoogleAdsConfig()
+  const refreshToken = await getRefreshToken()
+  const config = getGoogleAdsConfig(refreshToken)
   const cleanCustomerId = customerId.replace(/-/g, '')
   const loginCustomerId = config.loginCustomerId.replace(/-/g, '')
   const accessToken = await getAccessToken()

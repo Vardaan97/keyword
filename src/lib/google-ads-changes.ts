@@ -13,6 +13,7 @@
  */
 
 import { getGoogleAdsConfig, GOOGLE_ADS_ACCOUNTS, getAccountName } from './google-ads'
+import { getRefreshToken } from './token-storage'
 
 // Google Ads API v22
 const GOOGLE_ADS_API_VERSION = 'v22'
@@ -157,7 +158,9 @@ const RESOURCE_TYPE_NAMES: Record<string, string> = {
 let cachedAccessToken: { token: string; expiresAt: number } | null = null
 
 async function getAccessToken(): Promise<string> {
-  const config = getGoogleAdsConfig()
+  // Get refresh token from runtime storage (priority) or env var
+  const refreshToken = await getRefreshToken()
+  const config = getGoogleAdsConfig(refreshToken)
 
   // Check if we have a valid cached token (with 5 minute buffer)
   if (cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 5 * 60 * 1000) {
@@ -185,13 +188,7 @@ async function getAccessToken(): Promise<string> {
     console.error('[GOOGLE-ADS-CHANGES] Token error:', error)
 
     if (error.error === 'invalid_grant') {
-      const errorDesc = error.error_description || ''
-      if (errorDesc.includes('expired') || errorDesc.includes('revoked')) {
-        throw new Error(
-          'Token has been expired or revoked. ' +
-            'Please visit /api/auth/google-ads to get a new refresh token.'
-        )
-      }
+      throw new Error('Token expired or revoked. Re-authorize at /api/auth/google-ads')
     }
 
     throw new Error(error.error_description || 'Failed to get access token')
@@ -222,7 +219,6 @@ function buildChangeEventQuery(startDate: Date, endDate?: Date): string {
 
   return `
     SELECT
-      change_event.resource_type,
       change_event.change_date_time,
       change_event.change_resource_type,
       change_event.change_resource_name,
@@ -241,18 +237,16 @@ function buildChangeEventQuery(startDate: Date, endDate?: Date): string {
 }
 
 /**
- * Format date for GAQL (YYYY-MM-DD HH:MM:SS format in account timezone)
+ * Format date for GAQL (YYYYMMDD format - required for change_event queries)
+ * See: https://developers.google.com/google-ads/api/docs/change-event
  */
 function formatDateForGAQL(date: Date): string {
-  // Format: YYYY-MM-DD HH:MM:SS
+  // Format: YYYYMMDD (e.g., '20260123')
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
-  const hours = String(date.getHours()).padStart(2, '0')
-  const minutes = String(date.getMinutes()).padStart(2, '0')
-  const seconds = String(date.getSeconds()).padStart(2, '0')
 
-  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+  return `${year}${month}${day}`
 }
 
 // ============================================================================
@@ -463,7 +457,8 @@ export async function fetchChangeEvents(
   startDate: Date,
   endDate?: Date
 ): Promise<ChangeEventsResponse> {
-  const config = getGoogleAdsConfig()
+  const refreshToken = await getRefreshToken()
+  const config = getGoogleAdsConfig(refreshToken)
   const cleanCustomerId = customerId.replace(/-/g, '')
   const loginCustomerId = config.loginCustomerId.replace(/-/g, '')
 
@@ -481,6 +476,8 @@ export async function fetchChangeEvents(
   const accessToken = await getAccessToken()
   const query = buildChangeEventQuery(startDate, endDate)
 
+  console.log(`[GOOGLE-ADS-CHANGES] GAQL Query:\n${query}`)
+
   const url = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}/customers/${cleanCustomerId}/googleAds:search`
 
   try {
@@ -497,6 +494,7 @@ export async function fetchChangeEvents(
 
     if (!response.ok) {
       const error = await response.json()
+      console.log(`[GOOGLE-ADS-CHANGES] API Error Response:`, JSON.stringify(error, null, 2))
       const errorMsg = error.error?.message || 'Failed to fetch change events'
 
       // Check for quota exhaustion
