@@ -14,16 +14,34 @@ export function GoogleAdsStatus({ compact = false, showLabel = true }: GoogleAds
   const [isLoading, setIsLoading] = useState(true)
   const [showTooltip, setShowTooltip] = useState(false)
 
-  // Fetch token status
+  const [tokenValid, setTokenValid] = useState<boolean | null>(null)
+  const [reAuthUrl, setReAuthUrl] = useState<string | null>(null)
+
+  // Fetch token status AND verify it actually works
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/auth/google-ads/status')
-      const data = await res.json()
-      if (data.success) {
-        setStatus(data.data)
+      // Fetch basic status and verify in parallel
+      const [statusRes, verifyRes] = await Promise.all([
+        fetch('/api/auth/google-ads/status'),
+        fetch('/api/auth/google-ads/verify')
+      ])
+      const [statusData, verifyData] = await Promise.all([
+        statusRes.json(),
+        verifyRes.json()
+      ])
+
+      if (statusData.success) {
+        setStatus(statusData.data)
+      }
+
+      // Use the verify endpoint result for actual validity
+      setTokenValid(verifyData.valid === true)
+      if (!verifyData.valid && verifyData.reAuthUrl) {
+        setReAuthUrl(verifyData.reAuthUrl)
       }
     } catch (error) {
       console.error('Failed to fetch Google Ads status:', error)
+      setTokenValid(false)
     } finally {
       setIsLoading(false)
     }
@@ -46,11 +64,13 @@ export function GoogleAdsStatus({ compact = false, showLabel = true }: GoogleAds
         icon: '...'
       }
     }
-    if (!status?.hasToken) {
+    if (!status?.hasToken || tokenValid === false) {
+      // Token doesn't exist OR exists but failed verification
+      const hasExpiredToken = status?.hasToken && tokenValid === false
       return {
-        color: '#ef4444',
-        bgColor: 'rgba(239, 68, 68, 0.2)',
-        text: 'Not Connected',
+        color: hasExpiredToken ? '#f59e0b' : '#ef4444',
+        bgColor: hasExpiredToken ? 'rgba(245, 158, 11, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+        text: hasExpiredToken ? 'Token Expired' : 'Not Connected',
         icon: (
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="10"/>
@@ -58,6 +78,15 @@ export function GoogleAdsStatus({ compact = false, showLabel = true }: GoogleAds
             <line x1="9" y1="9" x2="15" y2="15"/>
           </svg>
         )
+      }
+    }
+    if (tokenValid === null) {
+      // Still verifying
+      return {
+        color: '#6b7280',
+        bgColor: 'rgba(107, 114, 128, 0.2)',
+        text: 'Verifying...',
+        icon: '...'
       }
     }
     return {
@@ -74,11 +103,12 @@ export function GoogleAdsStatus({ compact = false, showLabel = true }: GoogleAds
   }
 
   const statusInfo = getStatusInfo()
+  const linkHref = (reAuthUrl && tokenValid === false) ? reAuthUrl : '/settings/google-ads'
 
   if (compact) {
     return (
       <Link
-        href="/settings/google-ads"
+        href={linkHref}
         className="relative inline-flex items-center justify-center w-8 h-8 rounded-full transition-colors hover:opacity-80"
         style={{ background: statusInfo.bgColor, color: statusInfo.color }}
         onMouseEnter={() => setShowTooltip(true)}
@@ -107,6 +137,9 @@ export function GoogleAdsStatus({ compact = false, showLabel = true }: GoogleAds
             {status?.updatedBy && (
               <div className="text-xs mt-1 opacity-70">{status.updatedBy}</div>
             )}
+            {reAuthUrl && tokenValid === false && (
+              <div className="text-xs mt-1 text-amber-400">Click to re-authorize</div>
+            )}
           </div>
         )}
       </Link>
@@ -115,7 +148,7 @@ export function GoogleAdsStatus({ compact = false, showLabel = true }: GoogleAds
 
   return (
     <Link
-      href="/settings/google-ads"
+      href={linkHref}
       className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors hover:opacity-80"
       style={{ background: statusInfo.bgColor, color: statusInfo.color }}
     >

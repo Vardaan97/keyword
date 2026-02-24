@@ -465,11 +465,17 @@ export async function POST(request: NextRequest) {
             const errorMsg = googleError instanceof Error ? googleError.message : String(googleError)
             console.log('[STREAM] Google Ads error:', errorMsg)
 
+            // Check for TokenExpiredError using name check (instanceof can fail on Vercel serverless)
+            const isTokenExpired = googleError instanceof TokenExpiredError ||
+              (googleError instanceof Error && googleError.name === 'TokenExpiredError')
+
             // Clear bad tokens and include reAuthUrl for token expiry errors
-            if (googleError instanceof TokenExpiredError) {
+            if (isTokenExpired) {
               await clearTokens()
             }
-            const reAuthUrl = googleError instanceof TokenExpiredError ? googleError.reAuthUrl : undefined
+            const reAuthUrl = isTokenExpired && googleError instanceof Error && 'reAuthUrl' in googleError
+              ? (googleError as TokenExpiredError).reAuthUrl
+              : isTokenExpired ? '/api/auth/google-ads?returnTo=/' : undefined
 
             sendEvent('progress', {
               step: 'google_ads_failed',
@@ -485,8 +491,7 @@ export async function POST(request: NextRequest) {
                 timestamp: Date.now()
               })
 
-              // Implement Keywords Everywhere fallback here if needed
-              // For now, return the error with reAuthUrl if applicable
+              // Return the error with reAuthUrl if applicable
               sendEvent('error', {
                 message: errorMsg,
                 source: 'google_ads',
@@ -513,7 +518,18 @@ export async function POST(request: NextRequest) {
 
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error'
-        sendEvent('error', { message: errorMsg })
+        const isTokenExpired = error instanceof TokenExpiredError ||
+          (error instanceof Error && error.name === 'TokenExpiredError')
+        const reAuthUrl = isTokenExpired ? '/api/auth/google-ads?returnTo=/' : undefined
+
+        if (isTokenExpired) {
+          try { await clearTokens() } catch { /* ignore */ }
+        }
+
+        sendEvent('error', {
+          message: errorMsg,
+          ...(reAuthUrl ? { reAuthUrl } : {})
+        })
         controller.close()
       }
     }

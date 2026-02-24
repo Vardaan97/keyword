@@ -669,16 +669,23 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     console.error('[FETCH-IDEAS] Google Ads API error:', googleError)
 
     // Handle TokenExpiredError specially — clear bad tokens and include reAuthUrl for the UI
-    if (googleError instanceof TokenExpiredError) {
+    // Use name check as fallback since instanceof can fail on Vercel serverless across module boundaries
+    const isTokenExpired = googleError instanceof TokenExpiredError ||
+      (googleError instanceof Error && googleError.name === 'TokenExpiredError')
+
+    if (isTokenExpired) {
       console.log('[FETCH-IDEAS] Token expired — clearing tokens and returning reAuthUrl for UI')
       await clearTokens()
+      const reAuthUrl = googleError instanceof Error && 'reAuthUrl' in googleError
+        ? (googleError as TokenExpiredError).reAuthUrl
+        : '/api/auth/google-ads?returnTo=/'
       const authError: ApiErrorResponse = {
         type: 'AUTH',
-        message: googleError.message,
+        message: googleError instanceof Error ? googleError.message : String(googleError),
         isRetryable: false,
         accountId: customerId,
-        details: googleError.message,
-        reAuthUrl: googleError.reAuthUrl
+        details: googleError instanceof Error ? googleError.message : String(googleError),
+        reAuthUrl
       }
 
       // If source is explicitly 'google', don't fallback
@@ -702,9 +709,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
           meta: {
             source: 'keywords_everywhere',
             fallback: true,
-            googleError: googleError.message,
+            googleError: googleError instanceof Error ? googleError.message : String(googleError),
             googleErrorType: 'AUTH',
-            reAuthUrl: googleError.reAuthUrl,
+            reAuthUrl,
             processingTimeMs
           }
         })
