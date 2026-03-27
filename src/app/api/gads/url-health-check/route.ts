@@ -57,6 +57,13 @@ async function getAllUniqueUrls(): Promise<string[]> {
   return Array.from(urlSet).sort()
 }
 
+// Realistic browser User-Agent to avoid bot blocking
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 async function checkUrl(url: string): Promise<{
   statusCode: number | null
   finalUrl: string | null
@@ -66,51 +73,78 @@ async function checkUrl(url: string): Promise<{
 }> {
   const start = Date.now()
 
-  // Try HEAD first, fall back to GET
-  for (const method of ['HEAD', 'GET'] as const) {
+  // Use GET only — many servers (including koenig-solutions.com) redirect
+  // HEAD requests to error pages, returning false 500s
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 15000)
+
+    const response = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        'User-Agent': USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+      },
+    })
+
+    clearTimeout(timeout)
+
+    // Consume and discard response body to avoid memory leaks
+    await response.text().catch(() => {})
+
+    return {
+      statusCode: response.status,
+      finalUrl: response.url !== url ? response.url : null,
+      redirectCount: response.redirected ? 1 : 0,
+      responseTimeMs: Date.now() - start,
+      error: null,
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error'
+    return {
+      statusCode: null,
+      finalUrl: null,
+      redirectCount: 0,
+      responseTimeMs: Date.now() - start,
+      error: message.length > 200 ? message.substring(0, 200) : message,
+    }
+  }
+}
+
+/**
+ * Group URLs by domain so we can rate-limit per domain.
+ * Returns groups sorted so different domains are interleaved.
+ */
+function interleaveByDomain(urls: string[]): string[] {
+  const byDomain: Record<string, string[]> = {}
+  for (const url of urls) {
     try {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 10000)
-
-      const response = await fetch(url, {
-        method,
-        redirect: 'follow',
-        signal: controller.signal,
-        headers: { 'User-Agent': 'KoenigURLChecker/1.0' },
-      })
-
-      clearTimeout(timeout)
-
-      return {
-        statusCode: response.status,
-        finalUrl: response.url !== url ? response.url : null,
-        redirectCount: response.redirected ? 1 : 0,
-        responseTimeMs: Date.now() - start,
-        error: null,
-      }
-    } catch (err) {
-      // If HEAD failed, try GET
-      if (method === 'HEAD') continue
-
-      const message = err instanceof Error ? err.message : 'Unknown error'
-      return {
-        statusCode: null,
-        finalUrl: null,
-        redirectCount: 0,
-        responseTimeMs: Date.now() - start,
-        error: message.length > 200 ? message.substring(0, 200) : message,
-      }
+      const domain = new URL(url).hostname
+      if (!byDomain[domain]) byDomain[domain] = []
+      byDomain[domain].push(url)
+    } catch {
+      // Invalid URL, just append at end
+      if (!byDomain['_invalid']) byDomain['_invalid'] = []
+      byDomain['_invalid'].push(url)
     }
   }
 
-  // Should not reach here, but just in case
-  return {
-    statusCode: null,
-    finalUrl: null,
-    redirectCount: 0,
-    responseTimeMs: Date.now() - start,
-    error: 'Both HEAD and GET failed',
+  // Round-robin across domains to spread load
+  const result: string[] = []
+  const queues = Object.values(byDomain)
+  let maxLen = 0
+  for (const q of queues) maxLen = Math.max(maxLen, q.length)
+
+  for (let i = 0; i < maxLen; i++) {
+    for (const q of queues) {
+      if (i < q.length) result.push(q[i])
+    }
   }
+
+  return result
 }
 
 export async function GET(request: NextRequest) {
@@ -258,9 +292,11 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // Process a batch
-    const batch = uncheckedUrls.slice(0, batchSize)
-    const queue = new PQueue({ concurrency: 5, interval: 200, intervalCap: 5 })
+    // Process a batch — interleave by domain to avoid hammering one server
+    const batch = interleaveByDomain(uncheckedUrls.slice(0, batchSize))
+
+    // Low concurrency (3) with 500ms spacing to avoid rate-limiting
+    const queue = new PQueue({ concurrency: 3, interval: 500, intervalCap: 3 })
 
     const results: { url: string; result: Awaited<ReturnType<typeof checkUrl>> }[] = []
 
@@ -268,6 +304,8 @@ export async function POST(request: NextRequest) {
       queue.add(async () => {
         const result = await checkUrl(url)
         results.push({ url, result })
+        // Small delay between requests to same domain
+        await sleep(100)
       })
     }
 
