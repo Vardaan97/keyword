@@ -1,13 +1,15 @@
 import { NextResponse } from 'next/server'
-import { getRefreshToken } from '@/lib/token-storage'
+import { getRefreshToken, updateAccessToken, getCachedAccessToken } from '@/lib/token-storage'
+
+export const dynamic = 'force-dynamic'
 
 /**
  * Proactive token health check.
  * Tests the current refresh token by attempting a token refresh with Google.
  * Returns { valid: true } or { valid: false, reAuthUrl: '...' }
  *
- * UI can call this on page load or before starting a batch
- * to detect expired tokens before they cause processing failures.
+ * Optimized: if a cached access token exists (from a recent API call on this instance),
+ * returns valid immediately without hitting Google's token endpoint.
  */
 export async function GET() {
   const clientId = process.env.GOOGLE_ADS_CLIENT_ID
@@ -22,10 +24,18 @@ export async function GET() {
     })
   }
 
+  // Fast path: if we have a cached access token that's still valid, skip the refresh check
+  const cachedToken = await getCachedAccessToken()
+  if (cachedToken) {
+    return NextResponse.json({ valid: true })
+  }
+
   let refreshToken: string
   try {
     refreshToken = await getRefreshToken()
-  } catch {
+    console.log('[TOKEN-VERIFY] Got refresh token, attempting verification...')
+  } catch (err) {
+    console.log('[TOKEN-VERIFY] No refresh token available:', err instanceof Error ? err.message : err)
     return NextResponse.json({
       valid: false,
       reason: 'no_token',
@@ -56,6 +66,16 @@ export async function GET() {
         message: error.error_description || 'Token refresh failed',
         reAuthUrl: '/api/auth/google-ads?returnTo=/'
       })
+    }
+
+    // Cache the access token so subsequent verify calls and API calls skip the refresh
+    const data = await response.json()
+    if (data.access_token && data.expires_in) {
+      try {
+        await updateAccessToken(data.access_token, data.expires_in)
+      } catch {
+        // Non-fatal — access token caching is an optimization
+      }
     }
 
     return NextResponse.json({ valid: true })

@@ -10,6 +10,7 @@ import {
   RateLimitStatus,
   BatchCourseItem
 } from '@/types'
+import type { StyleReference, CreativeGenState } from '@/types/creatives'
 import { DEFAULT_SEED_PROMPT, DEFAULT_ANALYSIS_PROMPT } from './prompts'
 import { generateId } from './utils'
 import { AIProvider } from './ai-client'
@@ -118,6 +119,26 @@ interface AppState {
   savedBatchItems: BatchCourseItem[]
   setSavedBatchItems: (items: BatchCourseItem[]) => void
   clearSavedBatchItems: () => void
+
+  // Creative Generation Settings (persisted)
+  selectedCreativeTemplateId: string | null
+  setSelectedCreativeTemplateId: (id: string | null) => void
+  selectedPlatformSizes: string[]
+  setSelectedPlatformSizes: (sizes: string[]) => void
+  defaultCta: string
+  setDefaultCta: (cta: string) => void
+  useAiCopy: boolean
+  setUseAiCopy: (use: boolean) => void
+  useAiBackgrounds: boolean
+  setUseAiBackgrounds: (use: boolean) => void
+  styleReferences: StyleReference[]
+  addStyleReference: (ref: StyleReference) => void
+  removeStyleReference: (id: string) => void
+
+  // Creative Generation State (in-memory only)
+  creativeGenState: CreativeGenState
+  setCreativeGenState: (state: Partial<CreativeGenState>) => void
+  resetCreativeGenState: () => void
 }
 
 export const useAppStore = create<AppState>()(
@@ -286,7 +307,27 @@ export const useAppStore = create<AppState>()(
         }))
         set({ savedBatchItems: lightweightItems.slice(0, 20) }) // Max 20 items
       },
-      clearSavedBatchItems: () => set({ savedBatchItems: [] })
+      clearSavedBatchItems: () => set({ savedBatchItems: [] }),
+
+      // Creative Generation Settings
+      selectedCreativeTemplateId: null,
+      setSelectedCreativeTemplateId: (id) => set({ selectedCreativeTemplateId: id }),
+      selectedPlatformSizes: ['pmax-marketing', 'pmax-square', 'pmax-portrait'],
+      setSelectedPlatformSizes: (sizes) => set({ selectedPlatformSizes: sizes }),
+      defaultCta: 'Enroll Now',
+      setDefaultCta: (cta) => set({ defaultCta: cta }),
+      useAiCopy: true,
+      setUseAiCopy: (use) => set({ useAiCopy: use }),
+      useAiBackgrounds: false,
+      setUseAiBackgrounds: (use) => set({ useAiBackgrounds: use }),
+      styleReferences: [],
+      addStyleReference: (ref) => set({ styleReferences: [...get().styleReferences, ref] }),
+      removeStyleReference: (id) => set({ styleReferences: get().styleReferences.filter(r => r.id !== id) }),
+
+      // Creative Generation State (in-memory)
+      creativeGenState: { phase: 'idle', totalCourses: 0, completedCourses: 0, totalImages: 0, completedImages: 0, errors: [] },
+      setCreativeGenState: (state) => set({ creativeGenState: { ...get().creativeGenState, ...state } }),
+      resetCreativeGenState: () => set({ creativeGenState: { phase: 'idle', totalCourses: 0, completedCourses: 0, totalImages: 0, completedImages: 0, errors: [] } })
     }),
     {
       name: 'keyword-planner-storage',
@@ -299,6 +340,12 @@ export const useAppStore = create<AppState>()(
         selectedGoogleAdsAccountId: state.selectedGoogleAdsAccountId,
         aiProvider: state.aiProvider,
         theme: state.theme,
+        selectedCreativeTemplateId: state.selectedCreativeTemplateId,
+        selectedPlatformSizes: state.selectedPlatformSizes,
+        defaultCta: state.defaultCta,
+        useAiCopy: state.useAiCopy,
+        useAiBackgrounds: state.useAiBackgrounds,
+        styleReferences: state.styleReferences,
         // Don't persist savedBatchItems to localStorage - they're in-memory only
         // This prevents quota issues when processing large batches
         // savedBatchItems: state.savedBatchItems  // DISABLED

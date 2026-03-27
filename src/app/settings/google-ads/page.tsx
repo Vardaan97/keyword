@@ -31,17 +31,9 @@ export default function GoogleAdsSettingsPage() {
     }
   }, [])
 
-  // Fetch auth URL
-  const fetchAuthUrl = useCallback(async () => {
-    try {
-      const res = await fetch('/api/auth/google-ads')
-      const data = await res.json()
-      if (data.success) {
-        setAuthUrl(data.authorizationUrl)
-      }
-    } catch (error) {
-      console.error('Failed to fetch auth URL:', error)
-    }
+  // Auth URL — direct link to the OAuth redirect endpoint (it redirects to Google)
+  useEffect(() => {
+    setAuthUrl('/api/auth/google-ads?returnTo=/settings/google-ads')
   }, [])
 
   // Test connection
@@ -87,8 +79,7 @@ export default function GoogleAdsSettingsPage() {
   // Load data on mount
   useEffect(() => {
     fetchStatus()
-    fetchAuthUrl()
-  }, [fetchStatus, fetchAuthUrl])
+  }, [fetchStatus])
 
   // Format timestamp
   const formatDate = (dateStr: string) => {

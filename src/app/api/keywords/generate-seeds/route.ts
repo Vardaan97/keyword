@@ -52,7 +52,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
             content: filledPrompt
           }
         ],
-        temperature: 0.7,
+        temperature: 0,
         maxTokens: 500
       },
       { provider: aiProvider }

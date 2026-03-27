@@ -70,20 +70,32 @@ async function saveTokenToSupabase(refreshToken: string, userEmail?: string): Pr
  */
 async function getTokenFromSupabase(): Promise<string | null> {
   const supabase = getSupabaseAdmin()
-  if (!supabase) return null
+  if (!supabase) {
+    console.log('[TOKEN-STORAGE] Supabase not configured, skipping token lookup')
+    return null
+  }
 
   try {
     const { data, error } = await supabase
       .from('keyword_cache')
       .select('keywords')
       .eq('cache_key', SUPABASE_TOKEN_KEY)
-      .single()
+      .maybeSingle()  // Returns null instead of throwing when no rows found
 
-    if (error || !data?.keywords?.[0]?.refreshToken) return null
+    if (error) {
+      console.error('[TOKEN-STORAGE] Supabase token fetch error:', error.message, error.code)
+      return null
+    }
+
+    if (!data?.keywords?.[0]?.refreshToken) {
+      console.log('[TOKEN-STORAGE] No token found in Supabase (empty or missing)')
+      return null
+    }
 
     console.log('[TOKEN-STORAGE] Using refresh token from Supabase')
     return data.keywords[0].refreshToken
-  } catch {
+  } catch (err) {
+    console.error('[TOKEN-STORAGE] Supabase token fetch failed:', err instanceof Error ? err.message : err)
     return null
   }
 }
@@ -120,28 +132,38 @@ let tokenCache: StoredTokens | null = null
 
 /**
  * Get the current refresh token
- * Priority: in-memory → file → Supabase → env var
+ * Priority: in-memory → Supabase → file → env var
+ * Supabase is checked before file/env because on Vercel cold starts,
+ * the env var is stale (set at deployment time) and the file doesn't exist.
+ * Supabase always has the latest token from the most recent OAuth flow.
  */
 export async function getRefreshToken(): Promise<string> {
-  // 1. Try runtime file storage (fast, works locally)
-  const storedTokens = await getStoredTokens()
-  if (storedTokens?.refreshToken) {
-    console.log('[TOKEN-STORAGE] Using refresh token from runtime storage')
-    return storedTokens.refreshToken
+  // 1. Try in-memory cache (fastest, same serverless instance)
+  if (tokenCache?.refreshToken) {
+    console.log('[TOKEN-STORAGE] Using refresh token from memory cache')
+    return tokenCache.refreshToken
   }
 
-  // 2. Try Supabase (persistent across Vercel serverless instances)
+  // 2. Try Supabase FIRST (persistent across Vercel serverless instances — most reliable)
   const supabaseToken = await getTokenFromSupabase()
   if (supabaseToken) {
-    // Also cache in memory for subsequent calls in this instance
+    // Cache in memory for subsequent calls in this instance
     tokenCache = { refreshToken: supabaseToken, updatedAt: new Date().toISOString() }
     return supabaseToken
   }
 
-  // 3. Fall back to environment variable
+  // 3. Try runtime file storage (works locally, not on Vercel)
+  const storedTokens = await getStoredTokens()
+  if (storedTokens?.refreshToken) {
+    console.log('[TOKEN-STORAGE] Using refresh token from runtime file')
+    tokenCache = storedTokens
+    return storedTokens.refreshToken
+  }
+
+  // 4. Fall back to environment variable (may be stale on Vercel after re-auth)
   const envToken = process.env.GOOGLE_ADS_REFRESH_TOKEN
   if (envToken) {
-    console.log('[TOKEN-STORAGE] Using refresh token from environment variable')
+    console.log('[TOKEN-STORAGE] Using refresh token from environment variable (may be stale)')
     return envToken
   }
 

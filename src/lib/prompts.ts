@@ -58,6 +58,11 @@ SCORING CRITERIA (0-10 each):
 8. Negative Signals (inverse): Clean (10) vs contains negatives (0)
 9. Koenig Authority Fit: Matches Koenig's strengths (10) vs poor fit (0)
 
+IN-ACCOUNT STATUS:
+The "In Account" column indicates whether this keyword already exists in the Google Ads account.
+- YES = keyword already exists as an active keyword in at least one ad group (Account Names shows which accounts)
+- NO = keyword does not exist in the account yet
+
 EXCLUSION RULES:
 - Exclude keywords containing: free, salary, jobs, dumps, youtube, udemy, coursera, simplilearn
 - Exclude different vendor keywords (e.g., AWS keywords for Microsoft course)
@@ -70,8 +75,21 @@ For each keyword, provide:
 - Final Score (Base + Bonus, max 100)
 - Tier (1-4 based on score)
 - Match Type ([EXACT], PHRASE, BROAD)
-- Action (ADD/REVIEW/EXCLUDE)
-- Priority for new keywords (🔴 URGENT, 🟠 HIGH, 🟡 MEDIUM, ⚪ STANDARD, 🔵 REVIEW)
+- Action:
+  - ADD: High-quality keyword NOT in account (In Account = NO) — should be added
+  - BOOST: Good keyword already IN account (In Account = YES) — increase bid/priority
+  - MONITOR: Decent keyword already IN account (In Account = YES) — maintain current performance
+  - OPTIMIZE: In-account keyword that may need match type or bid adjustment
+  - REVIEW: Needs manual evaluation before deciding
+  - EXCLUDE: Should be excluded (matches exclusion rules)
+
+CRITICAL RULE: Keywords with In Account = YES must NEVER receive action "ADD".
+Use BOOST, MONITOR, or OPTIMIZE for in-account keywords based on their quality scores.
+
+- Priority (🔴 URGENT, 🟠 HIGH, 🟡 MEDIUM, ⚪ STANDARD, 🔵 REVIEW)
+  - For ADD: Urgency of adding this new keyword
+  - For BOOST: How much to increase bid/attention
+  - For MONITOR/OPTIMIZE: Level of attention needed
 
 KEYWORDS TO ANALYZE:
 {{KEYWORDS_DATA}}
@@ -99,14 +117,16 @@ Output as JSON array with this structure:
       "finalScore": number,
       "tier": "Tier 1|Tier 2|Tier 3|Tier 4|Review|Exclude",
       "matchType": "[EXACT]|PHRASE|BROAD|N/A",
-      "action": "ADD|REVIEW|EXCLUDE|EXCLUDE_RELEVANCE",
+      "action": "ADD|BOOST|MONITOR|OPTIMIZE|REVIEW|EXCLUDE|EXCLUDE_RELEVANCE",
       "exclusionReason": "..." (only if excluded),
-      "priority": "🔴 URGENT|🟠 HIGH|🟡 MEDIUM|⚪ STANDARD|🔵 REVIEW" (only for ADD action)
+      "priority": "🔴 URGENT|🟠 HIGH|🟡 MEDIUM|⚪ STANDARD|🔵 REVIEW"
     }
   ],
   "summary": {
     "totalAnalyzed": number,
     "toAdd": number,
+    "toBoost": number,
+    "toMonitor": number,
     "toReview": number,
     "excluded": number,
     "urgentCount": number,

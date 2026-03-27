@@ -16,6 +16,7 @@ export function GoogleAdsStatus({ compact = false, showLabel = true }: GoogleAds
 
   const [tokenValid, setTokenValid] = useState<boolean | null>(null)
   const [reAuthUrl, setReAuthUrl] = useState<string | null>(null)
+  const [consecutiveFailures, setConsecutiveFailures] = useState(0)
 
   // Fetch token status AND verify it actually works
   const fetchStatus = useCallback(async () => {
@@ -34,14 +35,32 @@ export function GoogleAdsStatus({ compact = false, showLabel = true }: GoogleAds
         setStatus(statusData.data)
       }
 
-      // Use the verify endpoint result for actual validity
-      setTokenValid(verifyData.valid === true)
-      if (!verifyData.valid && verifyData.reAuthUrl) {
-        setReAuthUrl(verifyData.reAuthUrl)
+      if (verifyData.valid === true) {
+        // Token verified successfully — reset failure counter
+        setTokenValid(true)
+        setConsecutiveFailures(0)
+        setReAuthUrl(null)
+      } else {
+        // Verification failed — only mark as expired after 2+ consecutive failures
+        // This prevents a single cold-start instance from flipping the status
+        setConsecutiveFailures(prev => {
+          const newCount = prev + 1
+          if (newCount >= 2) {
+            setTokenValid(false)
+            if (verifyData.reAuthUrl) {
+              setReAuthUrl(verifyData.reAuthUrl)
+            }
+          }
+          return newCount
+        })
       }
     } catch (error) {
       console.error('Failed to fetch Google Ads status:', error)
-      setTokenValid(false)
+      setConsecutiveFailures(prev => {
+        const newCount = prev + 1
+        if (newCount >= 2) setTokenValid(false)
+        return newCount
+      })
     } finally {
       setIsLoading(false)
     }
@@ -49,8 +68,8 @@ export function GoogleAdsStatus({ compact = false, showLabel = true }: GoogleAds
 
   useEffect(() => {
     fetchStatus()
-    // Refresh status every 30 seconds
-    const interval = setInterval(fetchStatus, 30000)
+    // Refresh status every 60 seconds (reduced from 30s to minimize cold-start triggers)
+    const interval = setInterval(fetchStatus, 60000)
     return () => clearInterval(interval)
   }, [fetchStatus])
 
@@ -103,7 +122,8 @@ export function GoogleAdsStatus({ compact = false, showLabel = true }: GoogleAds
   }
 
   const statusInfo = getStatusInfo()
-  const linkHref = (reAuthUrl && tokenValid === false) ? reAuthUrl : '/settings/google-ads'
+  // Always link to re-auth when token is invalid, settings page otherwise
+  const linkHref = tokenValid === false ? (reAuthUrl || '/api/auth/google-ads?returnTo=/') : '/settings/google-ads'
 
   if (compact) {
     return (

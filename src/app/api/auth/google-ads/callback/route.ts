@@ -165,13 +165,14 @@ export async function GET(request: NextRequest) {
 
     // AUTOMATICALLY SAVE TOKENS - No manual copying needed!
     try {
+      console.log('[OAUTH] Supabase configured:', !!process.env.NEXT_PUBLIC_SUPABASE_URL)
       await saveTokens({
         refreshToken,
         accessToken,
         expiresIn,
         userEmail
       })
-      console.log('[OAUTH] Tokens saved automatically to runtime storage')
+      console.log('[OAUTH] Tokens saved to runtime storage + Supabase (if configured)')
     } catch (saveError) {
       console.error('[OAUTH] Failed to auto-save tokens:', saveError)
       // Continue - user can still copy manually

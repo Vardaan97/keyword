@@ -162,12 +162,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     const processBatch = async (batchKeywords: KeywordIdea[], batchIndex: number, totalBatches: number): Promise<AnalyzedKeyword[]> => {
       const MAX_RETRIES = 2
 
-      // Format keywords data for the prompt
+      // Format keywords data for the prompt (includes in-account status for action accuracy)
       const keywordsData = batchKeywords.map(kw =>
-        `${kw.keyword},${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex}`
+        `${kw.keyword},${kw.avgMonthlySearches},${kw.competition},${kw.competitionIndex},${kw.inAccount ? 'YES' : 'NO'},${kw.inAccountNames?.join('; ') || '-'}`
       ).join('\n')
 
-      const keywordsHeader = 'Keyword,Avg Monthly Searches,Competition,Competition Index'
+      const keywordsHeader = 'Keyword,Avg Monthly Searches,Competition,Competition Index,In Account,Account Names'
       const formattedKeywords = `${keywordsHeader}\n${keywordsData}`
 
       // Fill in the prompt variables
