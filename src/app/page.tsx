@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useRef, useEffect } from "react"
+import { useState, useCallback, useRef, useEffect, useMemo } from "react"
 import { useAppStore, COUNTRY_OPTIONS, DATA_SOURCE_OPTIONS, DataSourceType, CountryCode, GOOGLE_ADS_ACCOUNTS, THEME_OPTIONS, ThemeType } from "@/lib/store"
 import { DEFAULT_SEED_PROMPT, DEFAULT_ANALYSIS_PROMPT } from "@/lib/prompts"
 import {
@@ -392,6 +392,9 @@ export default function Home() {
 
   // Selection state for keywords
   const [selectedKeywords, setSelectedKeywords] = useState<Set<string>>(new Set())
+
+  // Render cap for large keyword lists (performance optimization)
+  const [visibleCount, setVisibleCount] = useState(100)
 
   // Start timer
   const startTimer = () => {
@@ -1683,14 +1686,39 @@ export default function Home() {
   const stats = getStats()
   const selectedItem = batchItems.find(i => i.id === selectedItemId)
 
-  // Get current keywords based on view mode
-  const getCurrentKeywords = () => {
+  // Memoize keyword computations to avoid recalculating on every render
+  const currentKeywords = useMemo(() => {
     if (!selectedItem) return []
     return detailViewMode === 'raw' ? selectedItem.keywordIdeas : selectedItem.analyzedKeywords
-  }
+  }, [selectedItem, detailViewMode])
 
-  const currentKeywords = getCurrentKeywords()
-  const filteredKeywords = filterKeywords(currentKeywords)
+  const filteredKeywords = useMemo(
+    () => filterKeywords(currentKeywords),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentKeywords, filters, selectedKeywords]
+  )
+
+  const sortedKeywords = useMemo(() => {
+    return [...filteredKeywords].sort((a, b) => {
+      if (detailViewMode === 'analyzed') {
+        return (b as AnalyzedKeyword).finalScore - (a as AnalyzedKeyword).finalScore
+      }
+      return b.avgMonthlySearches - a.avgMonthlySearches
+    })
+  }, [filteredKeywords, detailViewMode])
+
+  // Only render a subset of rows initially for performance (2,700 rows = ~50k DOM nodes)
+  const visibleKeywords = sortedKeywords.slice(0, visibleCount)
+  const hasMore = visibleCount < sortedKeywords.length
+
+  // Reset visible count when context changes
+  useEffect(() => { setVisibleCount(100) }, [selectedItemId, filters, detailViewMode])
+
+  // Memoize select-all check (O(n) on every render otherwise)
+  const isAllSelected = useMemo(
+    () => filteredKeywords.length > 0 && filteredKeywords.every(k => selectedKeywords.has(k.keyword)),
+    [filteredKeywords, selectedKeywords]
+  )
 
   return (
     <ToastProvider>
@@ -3100,7 +3128,7 @@ export default function Home() {
                             <th className="w-10 py-3 px-2">
                               <input
                                 type="checkbox"
-                                checked={filteredKeywords.every(k => selectedKeywords.has(k.keyword))}
+                                checked={isAllSelected}
                                 onChange={(e) => {
                                   if (e.target.checked) {
                                     selectAllVisible(currentKeywords)
@@ -3126,14 +3154,7 @@ export default function Home() {
                           </tr>
                         </thead>
                         <tbody>
-                          {filteredKeywords
-                            .sort((a, b) => {
-                              if (detailViewMode === 'analyzed') {
-                                return (b as AnalyzedKeyword).finalScore - (a as AnalyzedKeyword).finalScore
-                              }
-                              return b.avgMonthlySearches - a.avgMonthlySearches
-                            })
-                            .map((kw, i) => {
+                          {visibleKeywords.map((kw, i) => {
                               const isSelected = selectedKeywords.has(kw.keyword)
                               const analyzed = kw as AnalyzedKeyword
 
@@ -3231,6 +3252,22 @@ export default function Home() {
                             })}
                         </tbody>
                       </table>
+                      {hasMore && (
+                        <div className="sticky bottom-0 flex items-center justify-center gap-2 py-3 bg-[var(--bg-secondary)]/90 backdrop-blur border-t border-[var(--border-subtle)]">
+                          <button
+                            onClick={() => setVisibleCount(prev => Math.min(prev + 200, sortedKeywords.length))}
+                            className="px-4 py-2 text-sm font-medium text-[var(--accent-electric)] hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
+                          >
+                            Show more ({sortedKeywords.length - visibleCount} remaining)
+                          </button>
+                          <button
+                            onClick={() => setVisibleCount(sortedKeywords.length)}
+                            className="px-4 py-2 text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
+                          >
+                            Show all
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -3568,6 +3605,7 @@ export default function Home() {
           courseName={selectedItem.courseInput.courseName}
           targetCountry={targetCountry}
           selectedAccountId={selectedGoogleAdsAccountId}
+          vendor={selectedItem.courseInput.primaryVendor}
         />
       )}
 

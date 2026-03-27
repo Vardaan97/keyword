@@ -10,31 +10,19 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import { AnalyzedKeyword, Action } from '@/types'
 import {
-  KeywordWithAdGroup,
-  ExportConfig,
-  generateGadsEditorExport,
-  generateExtendedExport,
+  generateMultiCampaignExport,
+  generateMultiCampaignExtendedExport,
+  SelectedCampaign,
   downloadExport,
   copyToClipboard,
-  getExportStats,
 } from '@/lib/export-gads-editor'
 import {
-  fetchAdGroupMatches,
-  AdGroupMatch,
-  normalizeUrl,
-  mapAccountId,
-  mapTargetCountry,
-} from '@/lib/ad-group-matcher'
+  getVendorAuthorization,
+  type GeoAuthorization,
+} from '@/lib/geo-authorization'
 import {
   Download,
   Copy,
@@ -43,8 +31,12 @@ import {
   Loader2,
   FileSpreadsheet,
   ChevronDown,
-  ChevronUp,
+  ChevronRight,
   Filter,
+  Search,
+  MapPin,
+  ShieldCheck,
+  ShieldAlert,
 } from 'lucide-react'
 
 interface ExportEditorModalProps {
@@ -55,10 +47,27 @@ interface ExportEditorModalProps {
   courseName: string
   targetCountry: string
   selectedAccountId: string
+  vendor?: string
+}
+
+interface TursoCampaignMatch {
+  accountName: string
+  campaignName: string
+  adGroupName: string
+  campaignStatus: string | null
+  adGroupStatus: string | null
+  adStrength: string | null
+  locations: string[]
+  authorized: boolean
+  finalUrl: string
 }
 
 const ACTION_OPTIONS: Action[] = ['ADD', 'BOOST', 'MONITOR', 'OPTIMIZE', 'REVIEW']
 const MATCH_TYPE_OPTIONS = ['Exact', 'Phrase', 'Broad'] as const
+
+function makeCampaignKey(m: TursoCampaignMatch): string {
+  return `${m.accountName}|${m.campaignName}|${m.adGroupName}`
+}
 
 export function ExportEditorModal({
   open,
@@ -68,300 +77,444 @@ export function ExportEditorModal({
   courseName,
   targetCountry,
   selectedAccountId,
+  vendor,
 }: ExportEditorModalProps) {
-  // State
+  // Campaign selection state
   const [loading, setLoading] = useState(true)
-  const [keywordsWithAdGroup, setKeywordsWithAdGroup] = useState<KeywordWithAdGroup[]>([])
+  const [tursoMatches, setTursoMatches] = useState<TursoCampaignMatch[]>([])
+  const [selectedCampaignKeys, setSelectedCampaignKeys] = useState<Set<string>>(new Set())
+  const [campaignSearch, setCampaignSearch] = useState('')
+  const [showOnlyAuthorized, setShowOnlyAuthorized] = useState(false)
+  const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(new Set())
+  const [vendorAuth, setVendorAuth] = useState<GeoAuthorization | null>(null)
+
+  // Keyword & export state
   const [selectedActions, setSelectedActions] = useState<Action[]>(['ADD', 'BOOST'])
   const [selectedMatchTypes, setSelectedMatchTypes] = useState<('Exact' | 'Phrase' | 'Broad')[]>(['Exact', 'Phrase'])
+  const [selectedKeywordSet, setSelectedKeywordSet] = useState<Set<string>>(new Set())
   const [copied, setCopied] = useState(false)
   const [showAllKeywords, setShowAllKeywords] = useState(false)
-  const [adGroupOptions, setAdGroupOptions] = useState<{ campaign: string; adGroup: string; country: string | null }[]>([])
+  const [error, setError] = useState<string | null>(null)
 
-  // Suggested ad group (from URL match)
-  const [suggestedCampaign, setSuggestedCampaign] = useState<string | null>(null)
-  const [suggestedAdGroup, setSuggestedAdGroup] = useState<string | null>(null)
-  const [matchConfidence, setMatchConfidence] = useState<'exact' | 'partial' | 'none'>('none')
-
-  // Load ad group mappings when modal opens
+  // Load data when modal opens
   useEffect(() => {
     if (!open) return
 
-    const loadMappings = async () => {
+    const loadData = async () => {
       setLoading(true)
+      setError(null)
 
       try {
-        // Fetch ad group match for the course URL
-        const matchResult = await fetchAdGroupMatches(
-          courseUrl,
-          selectedAccountId,
-          targetCountry
-        )
+        // Fetch Turso matches for the course URL
+        const response = await fetch(`/api/gads/turso-lookup?url=${encodeURIComponent(courseUrl)}`)
 
-        if (matchResult.bestMatch) {
-          setSuggestedCampaign(matchResult.bestMatch.campaignName)
-          setSuggestedAdGroup(matchResult.bestMatch.adGroupName)
-          setMatchConfidence(matchResult.bestMatch.confidence)
-        } else {
-          setSuggestedCampaign(null)
-          setSuggestedAdGroup(null)
-          setMatchConfidence('none')
+        if (!response.ok) {
+          throw new Error(`Turso lookup failed: ${response.status}`)
         }
 
-        // Fetch all ad group options for dropdown
-        const accountId = mapAccountId(selectedAccountId)
-        const response = await fetch(`/api/gads/ad-group-lookup?accountId=${accountId}&listAll=true`)
-        if (response.ok) {
-          const data = await response.json()
-          if (data.success && data.data) {
-            setAdGroupOptions(data.data)
+        const data = await response.json()
+
+        if (!data.success) {
+          throw new Error(data.error || 'Turso lookup failed')
+        }
+
+        // Get vendor geo-authorization
+        const auth = vendor ? getVendorAuthorization(vendor) : null
+        setVendorAuth(auth)
+
+        // Parse grouped response into flat list
+        const matches: TursoCampaignMatch[] = []
+        const accounts = data.data?.accounts || {}
+
+        for (const [accountName, accountData] of Object.entries(accounts)) {
+          const acct = accountData as {
+            campaigns: {
+              name: string
+              status: string | null
+              locations: string[]
+              adGroups: { name: string; status: string | null; adStrength: string | null; finalUrl?: string }[]
+            }[]
+          }
+          for (const campaign of acct.campaigns) {
+            for (const adGroup of campaign.adGroups) {
+              // Check geo authorization
+              let authorized = true
+              if (auth && !auth.isGlobal) {
+                authorized = campaign.locations.some(loc =>
+                  auth.authorizedCountries.some(c =>
+                    loc.toLowerCase().includes(c.toLowerCase()) ||
+                    c.toLowerCase().includes(loc.toLowerCase())
+                  )
+                )
+              }
+
+              matches.push({
+                accountName,
+                campaignName: campaign.name,
+                adGroupName: adGroup.name,
+                campaignStatus: campaign.status,
+                adGroupStatus: adGroup.status,
+                adStrength: adGroup.adStrength,
+                locations: campaign.locations,
+                authorized,
+                finalUrl: adGroup.finalUrl || courseUrl,
+              })
+            }
           }
         }
 
-        // Initialize keywords with ad group info
-        const initializedKeywords: KeywordWithAdGroup[] = keywords.map(kw => ({
-          ...kw,
-          campaignName: matchResult.bestMatch?.campaignName || '',
-          adGroupName: matchResult.bestMatch?.adGroupName || '',
-          adGroupMatch: matchResult.bestMatch || null,
-          selected: selectedActions.includes(kw.action),
-        }))
+        setTursoMatches(matches)
 
-        setKeywordsWithAdGroup(initializedKeywords)
-      } catch (error) {
-        console.error('[EXPORT-MODAL] Error loading mappings:', error)
-        // Initialize without ad group info
-        const initializedKeywords: KeywordWithAdGroup[] = keywords.map(kw => ({
-          ...kw,
-          campaignName: '',
-          adGroupName: '',
-          adGroupMatch: null,
-          selected: selectedActions.includes(kw.action),
-        }))
-        setKeywordsWithAdGroup(initializedKeywords)
+        // Auto-select authorized + enabled campaigns
+        const autoSelected = new Set<string>()
+        for (const m of matches) {
+          if (m.authorized && m.campaignStatus === 'Enabled') {
+            autoSelected.add(makeCampaignKey(m))
+          }
+        }
+        setSelectedCampaignKeys(autoSelected)
+
+        // Expand all accounts by default
+        setExpandedAccounts(new Set(matches.map(m => m.accountName)))
+
+        // Auto-select keywords by default actions
+        setSelectedKeywordSet(new Set(
+          keywords
+            .filter(kw => ['ADD', 'BOOST'].includes(kw.action))
+            .map(kw => kw.keyword)
+        ))
+      } catch (err) {
+        console.error('[EXPORT-MODAL] Error loading Turso data:', err)
+        setError(err instanceof Error ? err.message : 'Failed to load campaign data')
       }
 
       setLoading(false)
     }
 
-    loadMappings()
-  }, [open, courseUrl, selectedAccountId, targetCountry, keywords])
+    loadData()
+  }, [open, courseUrl, vendor, keywords])
 
-  // Update selection when actions change
+  // Update keyword selection when action filters change
   useEffect(() => {
-    setKeywordsWithAdGroup(prev =>
-      prev.map(kw => ({
-        ...kw,
-        selected: selectedActions.includes(kw.action),
-      }))
-    )
-  }, [selectedActions])
+    setSelectedKeywordSet(new Set(
+      keywords
+        .filter(kw => selectedActions.includes(kw.action))
+        .map(kw => kw.keyword)
+    ))
+  }, [selectedActions, keywords])
 
-  // Filter keywords for display
+  // Filtered campaigns
+  const filteredCampaigns = useMemo(() => {
+    let filtered = tursoMatches
+    if (showOnlyAuthorized) {
+      filtered = filtered.filter(m => m.authorized)
+    }
+    if (campaignSearch) {
+      const search = campaignSearch.toLowerCase()
+      filtered = filtered.filter(m =>
+        m.campaignName.toLowerCase().includes(search) ||
+        m.adGroupName.toLowerCase().includes(search) ||
+        m.accountName.toLowerCase().includes(search) ||
+        m.locations.some(l => l.toLowerCase().includes(search))
+      )
+    }
+    return filtered
+  }, [tursoMatches, showOnlyAuthorized, campaignSearch])
+
+  // Group campaigns by account
+  const campaignsByAccount = useMemo(() => {
+    const grouped: Record<string, TursoCampaignMatch[]> = {}
+    for (const m of filteredCampaigns) {
+      if (!grouped[m.accountName]) grouped[m.accountName] = []
+      grouped[m.accountName].push(m)
+    }
+    return grouped
+  }, [filteredCampaigns])
+
+  // Keywords for display
   const displayKeywords = useMemo(() => {
-    const filtered = keywordsWithAdGroup.filter(kw => selectedActions.includes(kw.action))
-    if (showAllKeywords) return filtered
-    return filtered.slice(0, 50)
-  }, [keywordsWithAdGroup, selectedActions, showAllKeywords])
+    const filtered = keywords
+      .filter(kw => selectedActions.includes(kw.action))
+      .sort((a, b) => b.finalScore - a.finalScore)
+    return showAllKeywords ? filtered : filtered.slice(0, 50)
+  }, [keywords, selectedActions, showAllKeywords])
 
-  const totalFiltered = useMemo(() => {
-    return keywordsWithAdGroup.filter(kw => selectedActions.includes(kw.action)).length
-  }, [keywordsWithAdGroup, selectedActions])
+  const totalFilteredKeywords = useMemo(() => {
+    return keywords.filter(kw => selectedActions.includes(kw.action)).length
+  }, [keywords, selectedActions])
 
-  // Get export stats
-  const stats = useMemo(() => {
-    return getExportStats(keywordsWithAdGroup, selectedActions)
-  }, [keywordsWithAdGroup, selectedActions])
+  // Stats
+  const selectedKeywordsCount = selectedKeywordSet.size
+  const selectedCampaignsCount = selectedCampaignKeys.size
+  const exportRows = selectedKeywordsCount * selectedCampaignsCount * selectedMatchTypes.length
 
-  // Toggle action
+  // Toggle helpers
   const toggleAction = (action: Action) => {
     setSelectedActions(prev =>
-      prev.includes(action)
-        ? prev.filter(a => a !== action)
-        : [...prev, action]
+      prev.includes(action) ? prev.filter(a => a !== action) : [...prev, action]
     )
   }
 
-  // Toggle match type
   const toggleMatchType = (matchType: 'Exact' | 'Phrase' | 'Broad') => {
     setSelectedMatchTypes(prev =>
-      prev.includes(matchType)
-        ? prev.filter(m => m !== matchType)
-        : [...prev, matchType]
+      prev.includes(matchType) ? prev.filter(m => m !== matchType) : [...prev, matchType]
     )
   }
 
-  // Toggle keyword selection
-  const toggleKeywordSelection = (index: number) => {
-    const actualIndex = keywordsWithAdGroup.findIndex(kw => kw === displayKeywords[index])
-    if (actualIndex === -1) return
-
-    setKeywordsWithAdGroup(prev => {
-      const updated = [...prev]
-      updated[actualIndex] = { ...updated[actualIndex], selected: !updated[actualIndex].selected }
-      return updated
+  const toggleCampaign = (key: string) => {
+    setSelectedCampaignKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
     })
   }
 
-  // Select/deselect all
-  const toggleSelectAll = () => {
-    const allSelected = displayKeywords.every(kw => kw.selected)
-    setKeywordsWithAdGroup(prev =>
-      prev.map(kw =>
-        selectedActions.includes(kw.action)
-          ? { ...kw, selected: !allSelected }
-          : kw
-      )
-    )
+  const toggleAccount = (accountName: string) => {
+    setExpandedAccounts(prev => {
+      const next = new Set(prev)
+      if (next.has(accountName)) next.delete(accountName)
+      else next.add(accountName)
+      return next
+    })
   }
 
-  // Apply suggested ad group to all
-  const applyToAll = () => {
-    if (!suggestedCampaign || !suggestedAdGroup) return
+  const toggleKeyword = (keyword: string) => {
+    setSelectedKeywordSet(prev => {
+      const next = new Set(prev)
+      if (next.has(keyword)) next.delete(keyword)
+      else next.add(keyword)
+      return next
+    })
+  }
 
-    setKeywordsWithAdGroup(prev =>
-      prev.map(kw => ({
-        ...kw,
-        campaignName: suggestedCampaign,
-        adGroupName: suggestedAdGroup,
-        overrideCampaign: undefined,
-        overrideAdGroup: undefined,
+  // Bulk campaign selection
+  const selectAllCampaigns = () => {
+    setSelectedCampaignKeys(new Set(filteredCampaigns.map(m => makeCampaignKey(m))))
+  }
+
+  const selectAuthorizedOnly = () => {
+    setSelectedCampaignKeys(new Set(
+      filteredCampaigns
+        .filter(m => m.authorized && m.campaignStatus === 'Enabled')
+        .map(m => makeCampaignKey(m))
+    ))
+  }
+
+  const clearCampaignSelection = () => {
+    setSelectedCampaignKeys(new Set())
+  }
+
+  // Export helpers
+  const getSelectedCampaigns = useCallback((): SelectedCampaign[] => {
+    return tursoMatches
+      .filter(m => selectedCampaignKeys.has(makeCampaignKey(m)))
+      .map(m => ({
+        campaignName: m.campaignName,
+        adGroupName: m.adGroupName,
+        finalUrl: m.finalUrl,
+        accountName: m.accountName,
       }))
-    )
-  }
+  }, [tursoMatches, selectedCampaignKeys])
 
-  // Update ad group for a keyword
-  const updateKeywordAdGroup = (index: number, campaign: string, adGroup: string) => {
-    const actualIndex = keywordsWithAdGroup.findIndex(kw => kw === displayKeywords[index])
-    if (actualIndex === -1) return
+  const getSelectedKeywords = useCallback((): AnalyzedKeyword[] => {
+    return keywords.filter(kw => selectedKeywordSet.has(kw.keyword))
+  }, [keywords, selectedKeywordSet])
 
-    setKeywordsWithAdGroup(prev => {
-      const updated = [...prev]
-      updated[actualIndex] = {
-        ...updated[actualIndex],
-        overrideCampaign: campaign,
-        overrideAdGroup: adGroup,
-      }
-      return updated
-    })
-  }
-
-  // Export handlers
   const handleExport = useCallback(() => {
-    const config: Partial<ExportConfig> = {
-      includeActions: selectedActions,
-      matchTypes: selectedMatchTypes,
-      format: 'tab',
-      includeHeader: true,
-      includeTierLabel: true,
-    }
-
-    const content = generateGadsEditorExport(keywordsWithAdGroup, config)
-    const filename = `${courseName.replace(/[^a-z0-9]/gi, '_')}_keywords_gads.txt`
+    const content = generateMultiCampaignExport(
+      getSelectedKeywords(),
+      getSelectedCampaigns(),
+      selectedMatchTypes
+    )
+    const filename = `${courseName.replace(/[^a-z0-9]/gi, '_')}_multi_campaign.txt`
     downloadExport(content, filename, 'tab')
-  }, [keywordsWithAdGroup, selectedActions, selectedMatchTypes, courseName])
+  }, [getSelectedKeywords, getSelectedCampaigns, selectedMatchTypes, courseName])
 
   const handleExportExtended = useCallback(() => {
-    const config: Partial<ExportConfig> = {
-      includeActions: selectedActions,
-      matchTypes: selectedMatchTypes,
-      format: 'tab',
-      includeHeader: true,
-    }
-
-    const content = generateExtendedExport(keywordsWithAdGroup, config)
-    const filename = `${courseName.replace(/[^a-z0-9]/gi, '_')}_keywords_extended.txt`
+    const content = generateMultiCampaignExtendedExport(
+      getSelectedKeywords(),
+      getSelectedCampaigns(),
+      selectedMatchTypes
+    )
+    const filename = `${courseName.replace(/[^a-z0-9]/gi, '_')}_multi_campaign_extended.txt`
     downloadExport(content, filename, 'tab')
-  }, [keywordsWithAdGroup, selectedActions, selectedMatchTypes, courseName])
+  }, [getSelectedKeywords, getSelectedCampaigns, selectedMatchTypes, courseName])
 
   const handleCopy = useCallback(async () => {
-    const config: Partial<ExportConfig> = {
-      includeActions: selectedActions,
-      matchTypes: selectedMatchTypes,
-      format: 'tab',
-      includeHeader: true,
-      includeTierLabel: true,
-    }
-
-    const content = generateGadsEditorExport(keywordsWithAdGroup, config)
+    const content = generateMultiCampaignExport(
+      getSelectedKeywords(),
+      getSelectedCampaigns(),
+      selectedMatchTypes
+    )
     const success = await copyToClipboard(content)
     if (success) {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }
-  }, [keywordsWithAdGroup, selectedActions, selectedMatchTypes])
-
-  // Group ad groups by campaign for dropdown
-  const adGroupsByCampaign = useMemo(() => {
-    const grouped: Record<string, { campaign: string; adGroup: string; country: string | null }[]> = {}
-    for (const opt of adGroupOptions) {
-      if (!grouped[opt.campaign]) {
-        grouped[opt.campaign] = []
-      }
-      grouped[opt.campaign].push(opt)
-    }
-    return grouped
-  }, [adGroupOptions])
+  }, [getSelectedKeywords, getSelectedCampaigns, selectedMatchTypes])
 
   return (
-    <Dialog open={open} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
+    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
+      <DialogContent className="max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FileSpreadsheet className="h-5 w-5 text-blue-600" />
             Export to Google Ads Editor
+            {vendor && (
+              <Badge variant="outline" className="ml-2 text-xs">
+                {vendor}
+                {vendorAuth && !vendorAuth.isGlobal && (
+                  <span className="ml-1 text-amber-500">(Geo-restricted)</span>
+                )}
+              </Badge>
+            )}
           </DialogTitle>
           <DialogDescription>
-            Review and export keywords with campaign/ad group assignments
+            Select campaigns and keywords for multi-campaign export
           </DialogDescription>
         </DialogHeader>
 
         {loading ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
-            <span className="ml-2 text-gray-600">Loading ad group mappings...</span>
+            <span className="ml-2 text-gray-600">Loading campaign data from Turso...</span>
+          </div>
+        ) : error ? (
+          <div className="flex items-center justify-center py-12 text-red-600">
+            <AlertTriangle className="h-6 w-6 mr-2" />
+            <span>{error}</span>
           </div>
         ) : (
-          <div className="flex-1 overflow-hidden flex flex-col gap-4">
-            {/* Ad Group Info */}
-            <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-sm text-gray-500 mb-1">Suggested Assignment</p>
-                  {suggestedCampaign && suggestedAdGroup ? (
-                    <>
-                      <p className="font-medium text-gray-900">
-                        Campaign: <span className="text-blue-600">{suggestedCampaign}</span>
-                      </p>
-                      <p className="font-medium text-gray-900">
-                        Ad Group: <span className="text-blue-600">{suggestedAdGroup}</span>
-                      </p>
-                      <Badge
-                        variant={matchConfidence === 'exact' ? 'default' : 'secondary'}
-                        className="mt-1"
-                      >
-                        {matchConfidence === 'exact' ? 'Exact match' : matchConfidence === 'partial' ? 'Partial match' : 'No match'}
-                      </Badge>
-                    </>
-                  ) : (
-                    <div className="flex items-center gap-2 text-amber-600">
-                      <AlertTriangle className="h-4 w-4" />
-                      <span className="text-sm">No ad group mapping found for this URL</span>
-                    </div>
+          <div className="flex-1 overflow-hidden flex flex-col gap-3">
+            {/* Campaign Selection Panel */}
+            <div className="bg-gray-50 rounded-lg border border-gray-200 max-h-[35vh] overflow-hidden flex flex-col">
+              {/* Campaign header bar */}
+              <div className="px-4 py-2 border-b border-gray-200 flex items-center gap-3 flex-shrink-0">
+                <span className="text-sm font-medium text-gray-700">
+                  Campaigns ({selectedCampaignsCount} of {tursoMatches.length} selected)
+                </span>
+
+                <div className="relative flex-1 max-w-xs">
+                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
+                  <input
+                    type="text"
+                    placeholder="Filter campaigns..."
+                    value={campaignSearch}
+                    onChange={(e) => setCampaignSearch(e.target.value)}
+                    className="w-full pl-7 pr-3 py-1 text-xs border border-gray-200 rounded-md bg-white"
+                  />
+                </div>
+
+                <div className="flex items-center gap-1 ml-auto">
+                  <button onClick={selectAllCampaigns} className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded">
+                    All
+                  </button>
+                  <button onClick={selectAuthorizedOnly} className="px-2 py-1 text-xs text-green-600 hover:bg-green-50 rounded">
+                    Authorized
+                  </button>
+                  <button onClick={clearCampaignSelection} className="px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 rounded">
+                    Clear
+                  </button>
+                  {vendorAuth && !vendorAuth.isGlobal && (
+                    <label className="flex items-center gap-1 text-xs text-gray-600 ml-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={showOnlyAuthorized}
+                        onChange={() => setShowOnlyAuthorized(!showOnlyAuthorized)}
+                        className="rounded border-gray-300"
+                      />
+                      Hide unauthorized
+                    </label>
                   )}
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={applyToAll}
-                  disabled={!suggestedCampaign || !suggestedAdGroup}
-                >
-                  Apply to All
-                </Button>
+              </div>
+
+              {/* Campaign list grouped by account */}
+              <div className="overflow-auto flex-1">
+                {Object.keys(campaignsByAccount).length === 0 ? (
+                  <div className="p-4 text-center text-sm text-gray-500">
+                    No campaigns found for this URL
+                  </div>
+                ) : (
+                  Object.entries(campaignsByAccount).map(([accountName, campaigns]) => (
+                    <div key={accountName} className="border-b border-gray-100 last:border-0">
+                      {/* Account header */}
+                      <button
+                        onClick={() => toggleAccount(accountName)}
+                        className="w-full px-4 py-1.5 flex items-center gap-2 hover:bg-gray-100 text-left"
+                      >
+                        {expandedAccounts.has(accountName) ? (
+                          <ChevronDown className="h-3.5 w-3.5 text-gray-400 flex-shrink-0" />
+                        ) : (
+                          <ChevronRight className="h-3.5 w-3.5 text-gray-400 flex-shrink-0" />
+                        )}
+                        <span className="text-xs font-semibold text-gray-600">{accountName}</span>
+                        <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                          {campaigns.length}
+                        </Badge>
+                        <span className="text-[10px] text-gray-400 ml-auto">
+                          {campaigns.filter(c => selectedCampaignKeys.has(makeCampaignKey(c))).length} selected
+                        </span>
+                      </button>
+
+                      {/* Campaign rows */}
+                      {expandedAccounts.has(accountName) && (
+                        <div className="pl-6">
+                          {campaigns.map(campaign => {
+                            const key = makeCampaignKey(campaign)
+                            const isSelected = selectedCampaignKeys.has(key)
+
+                            return (
+                              <label
+                                key={key}
+                                className={`flex items-center gap-2 px-3 py-1 hover:bg-gray-100 cursor-pointer text-xs ${
+                                  isSelected ? 'bg-blue-50/50' : ''
+                                } ${!campaign.authorized ? 'opacity-60' : ''}`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => toggleCampaign(key)}
+                                  className="rounded border-gray-300 h-3.5 w-3.5 flex-shrink-0"
+                                />
+                                <span className={`flex-1 truncate ${campaign.campaignStatus === 'Paused' ? 'text-gray-400' : 'text-gray-800'}`}>
+                                  {campaign.campaignName}
+                                </span>
+                                <span className="text-[10px] text-gray-400 truncate max-w-[120px] flex-shrink-0">
+                                  {campaign.adGroupName}
+                                </span>
+                                {campaign.campaignStatus === 'Paused' && (
+                                  <Badge variant="secondary" className="text-[9px] px-1 py-0 flex-shrink-0">Paused</Badge>
+                                )}
+                                {campaign.locations.length > 0 && (
+                                  <span className="flex items-center gap-0.5 flex-shrink-0">
+                                    <MapPin className="h-3 w-3 text-gray-400" />
+                                    <span className="text-[10px] text-gray-500 truncate max-w-[80px]">
+                                      {campaign.locations.slice(0, 2).join(', ')}
+                                      {campaign.locations.length > 2 && ` +${campaign.locations.length - 2}`}
+                                    </span>
+                                  </span>
+                                )}
+                                {vendorAuth && !vendorAuth.isGlobal && (
+                                  campaign.authorized ? (
+                                    <ShieldCheck className="h-3.5 w-3.5 text-green-500 flex-shrink-0" />
+                                  ) : (
+                                    <ShieldAlert className="h-3.5 w-3.5 text-amber-500 flex-shrink-0" />
+                                  )
+                                )}
+                              </label>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
               </div>
             </div>
 
-            {/* Filters */}
+            {/* Filters Row */}
             <div className="flex flex-wrap items-center gap-4">
               <div className="flex items-center gap-2">
                 <Filter className="h-4 w-4 text-gray-500" />
@@ -399,36 +552,42 @@ export function ExportEditorModal({
               </div>
             </div>
 
-            {/* Stats */}
+            {/* Stats Row */}
             <div className="flex items-center gap-4 text-sm">
               <span className="text-gray-600">
-                Selected: <span className="font-medium text-gray-900">{stats.selected}</span> of {stats.total}
+                Keywords: <span className="font-medium text-gray-900">{selectedKeywordsCount}</span>
               </span>
               <span className="text-gray-600">
-                With Ad Group: <span className="font-medium text-green-600">{stats.withAdGroup}</span>
+                Campaigns: <span className="font-medium text-gray-900">{selectedCampaignsCount}</span>
               </span>
-              {stats.withoutAdGroup > 0 && (
-                <span className="text-amber-600">
-                  Missing: <span className="font-medium">{stats.withoutAdGroup}</span>
-                </span>
-              )}
               <span className="text-gray-600">
-                Export rows: <span className="font-medium text-gray-900">
-                  {stats.selected * selectedMatchTypes.length}
-                </span>
+                Export rows: <span className="font-medium text-blue-600">{exportRows.toLocaleString()}</span>
+              </span>
+              <span className="text-[10px] text-gray-400">
+                ({selectedKeywordsCount} kw x {selectedCampaignsCount} camp x {selectedMatchTypes.length} match)
               </span>
             </div>
 
             {/* Keywords Table */}
-            <div className="flex-1 overflow-auto border border-gray-200 rounded-lg">
+            <div className="flex-1 overflow-auto border border-gray-200 rounded-lg min-h-0">
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 sticky top-0">
                   <tr>
                     <th className="px-3 py-2 text-left w-10">
                       <input
                         type="checkbox"
-                        checked={displayKeywords.every(kw => kw.selected)}
-                        onChange={toggleSelectAll}
+                        checked={displayKeywords.length > 0 && displayKeywords.every(kw => selectedKeywordSet.has(kw.keyword))}
+                        onChange={() => {
+                          const allVisible = displayKeywords.every(kw => selectedKeywordSet.has(kw.keyword))
+                          setSelectedKeywordSet(prev => {
+                            const next = new Set(prev)
+                            displayKeywords.forEach(kw => {
+                              if (allVisible) next.delete(kw.keyword)
+                              else next.add(kw.keyword)
+                            })
+                            return next
+                          })
+                        }}
                         className="rounded border-gray-300"
                       />
                     </th>
@@ -436,124 +595,95 @@ export function ExportEditorModal({
                     <th className="px-3 py-2 text-right w-20">Volume</th>
                     <th className="px-3 py-2 text-center w-16">Score</th>
                     <th className="px-3 py-2 text-center w-20">Action</th>
-                    <th className="px-3 py-2 text-left w-48">Ad Group</th>
+                    <th className="px-3 py-2 text-center w-16">In Acct</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {displayKeywords.map((kw, index) => (
-                    <tr
-                      key={`${kw.keyword}-${index}`}
-                      className={`${kw.selected ? 'bg-blue-50/50' : ''} hover:bg-gray-50`}
-                    >
-                      <td className="px-3 py-2">
-                        <input
-                          type="checkbox"
-                          checked={kw.selected}
-                          onChange={() => toggleKeywordSelection(index)}
-                          className="rounded border-gray-300"
-                        />
-                      </td>
-                      <td className="px-3 py-2 font-mono text-gray-900">{kw.keyword}</td>
-                      <td className="px-3 py-2 text-right text-gray-600">
-                        {kw.avgMonthlySearches.toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        <Badge variant={kw.finalScore >= 75 ? 'default' : 'secondary'}>
-                          {kw.finalScore}
-                        </Badge>
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        <Badge
-                          className={
-                            kw.action === 'ADD'
-                              ? 'bg-green-100 text-green-700'
-                              : kw.action === 'BOOST'
-                              ? 'bg-blue-100 text-blue-700'
-                              : 'bg-gray-100 text-gray-700'
-                          }
-                        >
-                          {kw.action}
-                        </Badge>
-                      </td>
-                      <td className="px-3 py-2">
-                        <Select
-                          value={`${kw.overrideCampaign || kw.campaignName}|${kw.overrideAdGroup || kw.adGroupName}`}
-                          onValueChange={(value) => {
-                            const [campaign, adGroup] = value.split('|')
-                            updateKeywordAdGroup(index, campaign, adGroup)
-                          }}
-                        >
-                          <SelectTrigger className="h-8 text-xs">
-                            <SelectValue placeholder="Select ad group">
-                              {(kw.overrideAdGroup || kw.adGroupName) || 'Select...'}
-                            </SelectValue>
-                          </SelectTrigger>
-                          <SelectContent className="max-h-60">
-                            {Object.entries(adGroupsByCampaign).map(([campaign, adGroups]) => (
-                              <div key={campaign}>
-                                <div className="px-2 py-1 text-xs font-semibold text-gray-500 bg-gray-50">
-                                  {campaign}
-                                </div>
-                                {adGroups.map((ag) => (
-                                  <SelectItem
-                                    key={`${ag.campaign}|${ag.adGroup}`}
-                                    value={`${ag.campaign}|${ag.adGroup}`}
-                                    className="text-xs"
-                                  >
-                                    {ag.adGroup}
-                                  </SelectItem>
-                                ))}
-                              </div>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </td>
-                    </tr>
-                  ))}
+                  {displayKeywords.map((kw, index) => {
+                    const isSelected = selectedKeywordSet.has(kw.keyword)
+                    return (
+                      <tr
+                        key={`${kw.keyword}-${index}`}
+                        className={`${isSelected ? 'bg-blue-50/50' : ''} hover:bg-gray-50`}
+                      >
+                        <td className="px-3 py-1.5">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleKeyword(kw.keyword)}
+                            className="rounded border-gray-300"
+                          />
+                        </td>
+                        <td className="px-3 py-1.5 font-mono text-xs text-gray-900">{kw.keyword}</td>
+                        <td className="px-3 py-1.5 text-right text-gray-600 text-xs">
+                          {kw.avgMonthlySearches.toLocaleString()}
+                        </td>
+                        <td className="px-3 py-1.5 text-center">
+                          <Badge variant={kw.finalScore >= 75 ? 'default' : 'secondary'} className="text-[10px]">
+                            {kw.finalScore}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-1.5 text-center">
+                          <Badge
+                            className={`text-[10px] ${
+                              kw.action === 'ADD'
+                                ? 'bg-green-100 text-green-700'
+                                : kw.action === 'BOOST'
+                                ? 'bg-blue-100 text-blue-700'
+                                : kw.action === 'MONITOR'
+                                ? 'bg-purple-100 text-purple-700'
+                                : 'bg-gray-100 text-gray-700'
+                            }`}
+                          >
+                            {kw.action}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-1.5 text-center text-xs">
+                          {kw.inAccount ? (
+                            <span className="text-amber-600">Yes</span>
+                          ) : (
+                            <span className="text-gray-400">-</span>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
 
-            {/* Show more */}
-            {totalFiltered > 50 && (
+            {/* Show more/fewer */}
+            {totalFilteredKeywords > 50 && (
               <button
                 onClick={() => setShowAllKeywords(!showAllKeywords)}
-                className="flex items-center justify-center gap-1 text-sm text-blue-600 hover:text-blue-700"
+                className="flex items-center justify-center gap-1 text-xs text-blue-600 hover:text-blue-700"
               >
-                {showAllKeywords ? (
-                  <>
-                    <ChevronUp className="h-4 w-4" />
-                    Show fewer
-                  </>
-                ) : (
-                  <>
-                    <ChevronDown className="h-4 w-4" />
-                    Show all {totalFiltered} keywords
-                  </>
-                )}
+                {showAllKeywords
+                  ? 'Show fewer'
+                  : `Show all ${totalFilteredKeywords} keywords`}
               </button>
             )}
           </div>
         )}
 
-        <DialogFooter className="border-t pt-4">
+        <DialogFooter className="border-t pt-3">
           <div className="flex items-center justify-between w-full">
-            <div className="flex items-center gap-2">
-              {stats.withoutAdGroup > 0 && (
-                <span className="text-xs text-amber-600 flex items-center gap-1">
-                  <AlertTriangle className="h-3 w-3" />
-                  {stats.withoutAdGroup} keywords missing ad group
+            <div className="text-xs text-gray-500">
+              {tursoMatches.length > 0 && (
+                <span>
+                  {tursoMatches.filter(m => m.authorized).length} authorized / {tursoMatches.length} total campaigns
                 </span>
               )}
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={onClose}>
+              <Button variant="outline" onClick={onClose} size="sm">
                 Cancel
               </Button>
               <Button
                 variant="outline"
+                size="sm"
                 onClick={handleCopy}
-                disabled={stats.selected === 0}
+                disabled={selectedKeywordsCount === 0 || selectedCampaignsCount === 0}
               >
                 {copied ? (
                   <>
@@ -569,19 +699,21 @@ export function ExportEditorModal({
               </Button>
               <Button
                 variant="outline"
+                size="sm"
                 onClick={handleExportExtended}
-                disabled={stats.selected === 0}
+                disabled={selectedKeywordsCount === 0 || selectedCampaignsCount === 0}
               >
                 <Download className="h-4 w-4 mr-1" />
                 Extended
               </Button>
               <Button
+                size="sm"
                 onClick={handleExport}
-                disabled={stats.selected === 0}
+                disabled={selectedKeywordsCount === 0 || selectedCampaignsCount === 0}
                 className="bg-blue-600 hover:bg-blue-700"
               >
                 <Download className="h-4 w-4 mr-1" />
-                Export for Ads Editor
+                Export ({exportRows.toLocaleString()} rows)
               </Button>
             </div>
           </div>

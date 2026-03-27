@@ -343,6 +343,244 @@ export async function copyToClipboard(content: string): Promise<boolean> {
   }
 }
 
+// ============================================
+// Multi-Campaign Export Types & Functions
+// ============================================
+
+/**
+ * Represents a single row in a multi-campaign export.
+ * Each keyword x campaign x match type combination produces one item.
+ */
+export interface MultiCampaignExportItem {
+  keyword: string
+  matchType: 'Exact' | 'Phrase' | 'Broad'
+  campaignName: string
+  adGroupName: string
+  finalUrl: string
+  status: string  // always "Enabled"
+  tier?: string
+  priority?: string
+  // Metadata (for extended export)
+  avgMonthlySearches?: number
+  competition?: string
+  finalScore?: number
+  action?: string
+  inAccount?: boolean
+  accountName?: string
+}
+
+/**
+ * Campaign selection for multi-campaign export
+ */
+export interface SelectedCampaign {
+  campaignName: string
+  adGroupName: string
+  finalUrl: string
+  accountName?: string
+}
+
+/**
+ * Build MultiCampaignExportItem records from the cartesian product
+ * of keywords x selectedCampaigns x matchTypes.
+ */
+function buildMultiCampaignItems(
+  keywords: AnalyzedKeyword[],
+  selectedCampaigns: SelectedCampaign[],
+  matchTypes: ('Exact' | 'Phrase' | 'Broad')[],
+): MultiCampaignExportItem[] {
+  const items: MultiCampaignExportItem[] = []
+
+  for (const keyword of keywords) {
+    for (const campaign of selectedCampaigns) {
+      for (const matchType of matchTypes) {
+        items.push({
+          keyword: formatKeyword(keyword.keyword),
+          matchType,
+          campaignName: campaign.campaignName,
+          adGroupName: campaign.adGroupName,
+          finalUrl: campaign.finalUrl,
+          status: 'Enabled',
+          tier: keyword.tier,
+          priority: keyword.priority,
+          // Metadata
+          avgMonthlySearches: keyword.avgMonthlySearches,
+          competition: keyword.competition,
+          finalScore: keyword.finalScore,
+          action: keyword.action,
+          inAccount: keyword.inAccount,
+          accountName: campaign.accountName,
+        })
+      }
+    }
+  }
+
+  return items
+}
+
+/**
+ * Escape a value for CSV format if needed
+ */
+function escapeForCsv(val: string, format: 'tab' | 'csv'): string {
+  if (format === 'csv' && (val.includes(',') || val.includes('"') || val.includes('\n'))) {
+    return `"${val.replace(/"/g, '""')}"`
+  }
+  return val
+}
+
+/**
+ * Join a row of values with the appropriate separator and escaping
+ */
+function joinRow(row: string[], format: 'tab' | 'csv'): string {
+  const separator = format === 'tab' ? '\t' : ','
+  if (format === 'csv') {
+    return row.map(val => escapeForCsv(val, format)).join(separator)
+  }
+  return row.join(separator)
+}
+
+/**
+ * Generate Google Ads Editor export for multiple campaigns.
+ *
+ * Produces one row per keyword x campaign x match type combination.
+ * Columns: Campaign, Ad group, Keyword, Match type, Final URL, Status, Labels
+ *
+ * @param keywords - Analyzed keywords to export
+ * @param selectedCampaigns - Target campaigns with ad group and final URL
+ * @param matchTypes - Match types to generate rows for
+ * @param config - Optional export configuration overrides
+ * @returns Tab-separated (or CSV) string ready for download
+ */
+export function generateMultiCampaignExport(
+  keywords: AnalyzedKeyword[],
+  selectedCampaigns: SelectedCampaign[],
+  matchTypes: ('Exact' | 'Phrase' | 'Broad')[],
+  config: Partial<ExportConfig> = {}
+): string {
+  const mergedConfig: ExportConfig = { ...DEFAULT_CONFIG, ...config }
+  const items = buildMultiCampaignItems(keywords, selectedCampaigns, matchTypes)
+
+  // Header
+  const headers = ['Campaign', 'Ad group', 'Keyword', 'Match type', 'Final URL', 'Status', 'Labels']
+
+  const rows: string[] = []
+
+  if (mergedConfig.includeHeader) {
+    rows.push(joinRow(headers, mergedConfig.format))
+  }
+
+  for (const item of items) {
+    // Build labels
+    const labels: string[] = []
+    if (mergedConfig.includeTierLabel && item.tier) {
+      labels.push(item.tier)
+    }
+    if (mergedConfig.includePriorityLabel && item.priority) {
+      const priorityText = item.priority.replace(/[🔴🟠🟡⚪🔵]\s*/g, '')
+      labels.push(priorityText)
+    }
+
+    const row: string[] = [
+      item.campaignName,
+      item.adGroupName,
+      item.keyword,
+      item.matchType,
+      item.finalUrl,
+      item.status,
+      labels.join('; '),
+    ]
+
+    rows.push(joinRow(row, mergedConfig.format))
+  }
+
+  return rows.join('\n')
+}
+
+/**
+ * Generate extended multi-campaign export with all metadata columns.
+ *
+ * Same cartesian product as generateMultiCampaignExport, but includes
+ * additional columns: Search Volume, Competition, Score, Tier, Action,
+ * Priority, In Account, Account Name.
+ *
+ * @param keywords - Analyzed keywords to export
+ * @param selectedCampaigns - Target campaigns with ad group and final URL
+ * @param matchTypes - Match types to generate rows for
+ * @param config - Optional export configuration overrides
+ * @returns Tab-separated (or CSV) string ready for download
+ */
+export function generateMultiCampaignExtendedExport(
+  keywords: AnalyzedKeyword[],
+  selectedCampaigns: SelectedCampaign[],
+  matchTypes: ('Exact' | 'Phrase' | 'Broad')[],
+  config: Partial<ExportConfig> = {}
+): string {
+  const mergedConfig: ExportConfig = { ...DEFAULT_CONFIG, ...config }
+  const items = buildMultiCampaignItems(keywords, selectedCampaigns, matchTypes)
+
+  // Extended headers
+  const headers = [
+    'Campaign',
+    'Ad group',
+    'Keyword',
+    'Match type',
+    'Final URL',
+    'Status',
+    'Labels',
+    'Search Volume',
+    'Competition',
+    'Score',
+    'Tier',
+    'Action',
+    'Priority',
+    'In Account',
+    'Account Name',
+  ]
+
+  const rows: string[] = []
+
+  if (mergedConfig.includeHeader) {
+    rows.push(joinRow(headers, mergedConfig.format))
+  }
+
+  for (const item of items) {
+    // Build labels
+    const labels: string[] = []
+    if (mergedConfig.includeTierLabel && item.tier) {
+      labels.push(item.tier)
+    }
+    if (mergedConfig.includePriorityLabel && item.priority) {
+      const priorityText = item.priority.replace(/[🔴🟠🟡⚪🔵]\s*/g, '')
+      labels.push(priorityText)
+    }
+
+    const priorityText = item.priority
+      ? item.priority.replace(/[🔴🟠🟡⚪🔵]\s*/g, '')
+      : ''
+
+    const row: string[] = [
+      item.campaignName,
+      item.adGroupName,
+      item.keyword,
+      item.matchType,
+      item.finalUrl,
+      item.status,
+      labels.join('; '),
+      item.avgMonthlySearches?.toString() ?? '',
+      item.competition ?? '',
+      item.finalScore?.toString() ?? '',
+      item.tier ?? '',
+      item.action ?? '',
+      priorityText,
+      item.inAccount ? 'Yes' : 'No',
+      item.accountName ?? '',
+    ]
+
+    rows.push(joinRow(row, mergedConfig.format))
+  }
+
+  return rows.join('\n')
+}
+
 /**
  * Get summary stats for export preview
  */
