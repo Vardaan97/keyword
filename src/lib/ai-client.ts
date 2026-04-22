@@ -4,6 +4,7 @@
  */
 
 import OpenAI from 'openai'
+import { clampMaxTokens } from './model-caps'
 
 export type AIProvider = 'openai' | 'openrouter'
 
@@ -23,6 +24,7 @@ export interface ChatCompletionOptions {
   maxTokens?: number
   jsonMode?: boolean
   model?: string  // Override the default model for this request
+  signal?: AbortSignal  // Propagate client abort to the SDK so in-flight requests stop
 }
 
 export interface ChatCompletionResult {
@@ -32,30 +34,48 @@ export interface ChatCompletionResult {
   model: string
 }
 
-// OpenRouter models - verified working models (Dec 2025)
-// NOTE: Model IDs must match OpenRouter's exact naming
+// OpenRouter models - verified model IDs (Apr 2026)
 const OPENROUTER_MODELS = {
-  // Default: GPT-4o Mini - fast, cheap, most reliable for JSON
-  default: 'openai/gpt-4o-mini',
-  // OpenAI models (best for JSON output)
-  gpt4o: 'openai/gpt-4o', // 128K context
-  gpt4o_mini: 'openai/gpt-4o-mini', // 128K context, cost-effective, BEST for JSON
-  // Gemini models - FAST options with huge context
-  gemini_flash: 'google/gemini-2.0-flash-001', // VERIFIED WORKING - fast, 1M context
-  gemini_flash_8b: 'google/gemini-flash-1.5-8b', // Smaller, faster
-  gemini_pro: 'google/gemini-pro-1.5', // 2M context
-  // Claude models
-  claude_sonnet: 'anthropic/claude-3.5-sonnet', // 200K context
-  claude_haiku: 'anthropic/claude-3-haiku', // Fast, cheap, 200K context
-  // Auto router - let OpenRouter pick the best model
+  default: 'google/gemini-3.1-flash-lite-preview',
+  // Gemini 3.x — 65K output, 1M context
+  gemini_3_1_flash_lite: 'google/gemini-3.1-flash-lite-preview',
+  gemini_3_flash: 'google/gemini-3-flash-preview',
+  // Gemini 2.5 — 65K output
+  gemini_2_5_flash: 'google/gemini-2.5-flash',
+  // Legacy Gemini — 8K output
+  gemini_2_flash: 'google/gemini-2.0-flash-001',
+  gemini_pro: 'google/gemini-pro-1.5',
+  // OpenAI via OpenRouter
+  gpt4o: 'openai/gpt-4o',
+  gpt4o_mini: 'openai/gpt-4o-mini',
+  // Claude via OpenRouter
+  claude_sonnet: 'anthropic/claude-3.5-sonnet',
+  claude_haiku: 'anthropic/claude-3-haiku',
+  // Auto router
   auto: 'openrouter/auto',
 } as const
 
-// Fast models for analysis - USE VERIFIED WORKING MODELS ONLY
-// GPT-4o-mini is most reliable for JSON output
+/**
+ * Fast analysis model priority order.
+ * Element 0 is the primary; subsequent elements are retry fallbacks.
+ * All three Gemini entries have ~65K output tokens, required for 250-keyword batches.
+ */
+export const ANALYSIS_MODEL_CHAIN: Record<AIProvider, string[]> = {
+  openrouter: [
+    'google/gemini-3.1-flash-lite-preview',  // primary — cheapest, 65K output
+    'google/gemini-3-flash-preview',         // fallback 1 — slightly more capable
+    'google/gemini-2.5-flash',               // fallback 2 — stable, proven, 65K output
+    'google/gemini-2.5-flash-lite',          // fallback 3 — cheapest backup, 65K output
+  ],
+  openai: [
+    'gpt-4o-mini',  // only option for direct OpenAI; retries stay on same model
+  ],
+}
+
+/** Backwards-compat shim: existing code imports FAST_ANALYSIS_MODELS[provider] as a string. */
 export const FAST_ANALYSIS_MODELS = {
-  openrouter: 'google/gemini-2.0-flash-001',  // VERIFIED WORKING - 1M context
-  openai: 'gpt-4o-mini',  // Most reliable for JSON, 128K context
+  openrouter: ANALYSIS_MODEL_CHAIN.openrouter[0],
+  openai: ANALYSIS_MODEL_CHAIN.openai[0],
 } as const
 
 // Alternative fast models (for manual selection or fallback)
@@ -175,14 +195,25 @@ class AIClient {
     // For OpenRouter/Gemini, we rely on prompt engineering instead
     const supportsJsonMode = provider === 'openai'
 
+    // Clamp max_tokens against the model's published output cap. Sending a
+    // value above the cap causes OpenRouter/OpenAI to 400 with HTML bodies
+    // in some edge cases — clamping prevents that class of failure.
+    const safeMaxTokens = clampMaxTokens(model, options.maxTokens ?? 1000)
+    if (safeMaxTokens !== (options.maxTokens ?? 1000)) {
+      console.log(`[AI-CLIENT] Clamped max_tokens ${options.maxTokens} -> ${safeMaxTokens} for ${model}`)
+    }
+
     try {
-      const completion = await client.chat.completions.create({
-        model,
-        messages: options.messages,
-        temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens ?? 1000,
-        ...(options.jsonMode && supportsJsonMode && { response_format: { type: 'json_object' } }),
-      })
+      const completion = await client.chat.completions.create(
+        {
+          model,
+          messages: options.messages,
+          temperature: options.temperature ?? 0.7,
+          max_tokens: safeMaxTokens,
+          ...(options.jsonMode && supportsJsonMode && { response_format: { type: 'json_object' } }),
+        },
+        options.signal ? { signal: options.signal } : undefined,
+      )
 
       const content = completion.choices[0]?.message?.content || ''
       const tokensUsed = completion.usage?.total_tokens
@@ -217,9 +248,12 @@ class AIClient {
         model,
       }
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      console.error(`[AI-CLIENT] ${provider} error:`, errorMessage)
-      throw error
+      // Surface HTTP status from the SDK so callers can log 400 vs 429 vs 504 clearly.
+      const e = error as { status?: number; message?: string; error?: { message?: string } }
+      const status = e?.status ? `HTTP ${e.status}` : ''
+      const msg = e?.error?.message || e?.message || String(error)
+      console.error(`[AI-CLIENT] ${provider} error ${status}:`, msg)
+      throw new Error(`${provider}${status ? ' ' + status : ''}: ${msg}`)
     }
   }
 

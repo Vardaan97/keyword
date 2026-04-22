@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { aiClient, AIProvider, FAST_ANALYSIS_MODELS } from '@/lib/ai-client'
+import { aiClient, AIProvider, ANALYSIS_MODEL_CHAIN } from '@/lib/ai-client'
+import { MODEL_OUTPUT_CAPS, TOKENS_PER_KEYWORD, PER_REQUEST_OVERHEAD_TOKENS } from '@/lib/model-caps'
 import { fillPromptVariables } from '@/lib/prompts'
 import { KeywordIdea, AnalyzedKeyword, ApiResponse } from '@/types'
+
+// Route config: allow long-running analysis and keep the handler out of static caches.
+export const maxDuration = 300
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 interface AnalyzeRequest {
   prompt: string
@@ -25,11 +31,12 @@ interface AnalysisResponse {
   }
 }
 
-// Process ALL keywords in a single batch - using large context models via OpenRouter
-// Claude Sonnet 4: 200K context, 64K output tokens
-// Gemini Pro: 1M context, 65K output tokens
-// Process all at once for faster turnaround
-const MAX_KEYWORDS_PER_BATCH = 1000 // Effectively unlimited
+// Smaller batches × high concurrency is faster than fewer large batches for
+// Gemini 3.1 Flash Lite Preview (65K output, 1M context). Trade-off math:
+//   - 150 kw × 220 tokens ≈ 33K output — completes in ~40–60s
+//   - 16 batches serial at 250/batch ≈ 4–6 min; 27 batches at 150/batch × 6 concurrent ≈ ~2 min
+// Per-model output caps are enforced in ai-client; this is an ergonomics tuning knob.
+const MAX_KEYWORDS_PER_BATCH = 150
 
 /**
  * Extract complete JSON objects from a potentially truncated array
@@ -136,6 +143,43 @@ function repairJson(jsonString: string): string {
   return repaired
 }
 
+/**
+ * Build a neutral-scored AnalyzedKeyword for cases where the AI skipped, timed out,
+ * or the whole batch failed. Keeps keyword present in the output so the UI never
+ * loses rows and downstream CSV export stays complete.
+ */
+function buildReviewFallback(original: KeywordIdea): AnalyzedKeyword {
+  const competitionBonus = original.competition === 'LOW' ? 10 : original.competition === 'MEDIUM' ? 5 : 0
+  const baseScore = 45
+  return {
+    keyword: original.keyword,
+    avgMonthlySearches: original.avgMonthlySearches,
+    competition: original.competition,
+    competitionIndex: original.competitionIndex,
+    lowTopOfPageBidMicros: original.lowTopOfPageBidMicros,
+    highTopOfPageBidMicros: original.highTopOfPageBidMicros,
+    inAccount: original.inAccount,
+    courseRelevance: 5,
+    relevanceStatus: 'RELATED',
+    conversionPotential: 5,
+    searchIntent: 5,
+    vendorSpecificity: 5,
+    keywordSpecificity: 5,
+    actionWordStrength: 5,
+    commercialSignals: 5,
+    negativeSignals: 8,
+    koenigFit: 5,
+    baseScore,
+    competitionBonus,
+    finalScore: baseScore + competitionBonus,
+    tier: 'Review',
+    matchType: 'PHRASE',
+    action: 'REVIEW',
+    exclusionReason: undefined,
+    priority: '🔵 REVIEW',
+  }
+}
+
 export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<AnalysisResponse>>> {
   const startTime = Date.now()
 
@@ -184,24 +228,35 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         console.log(`[ANALYZE] ${batchLabel} Sending ${batchKeywords.length} keywords to AI...`, retryCount > 0 ? `[Retry ${retryCount}]` : '')
 
         try {
-          // Use fast model for analysis - try configured model first, fallback to GPT-4o-mini if needed
           const preferredProvider: AIProvider = aiProvider || 'openrouter'
 
-          // Model selection: Use verified working models only
-          // Primary: gemini-2.0-flash-001 (fast, 1M context, VERIFIED)
-          // Fallback: gpt-4o-mini (most reliable for JSON output)
-          const fastModel = retryCount === 0
-            ? FAST_ANALYSIS_MODELS[preferredProvider] || 'google/gemini-2.0-flash-001'
-            : 'openai/gpt-4o-mini'  // Use more reliable GPT-4o-mini on retry
+          // Model chain: primary → fallback 1 → fallback 2 (see ANALYSIS_MODEL_CHAIN in ai-client).
+          // For openrouter: gemini-3.1-flash-lite-preview → gemini-3-flash-preview → gemini-2.5-flash.
+          const chain = ANALYSIS_MODEL_CHAIN[preferredProvider]
+          const fastModel = chain[Math.min(retryCount, chain.length - 1)]
 
-          console.log(`[ANALYZE] ${batchLabel} Using model: ${fastModel}${retryCount > 0 ? ' (fallback)' : ''}`)
+          console.log(`[ANALYZE] ${batchLabel} Using model: ${fastModel}${retryCount > 0 ? ` (fallback ${retryCount})` : ''}`)
 
-          const result = await aiClient.chatCompletionWithFallback(
-            {
-              messages: [
-                {
-                  role: 'system',
-                  content: `You are a keyword analysis expert for IT training courses. Analyze keywords for relevance and commercial potential.
+          // Right-size max_tokens against the chosen model's published output cap.
+          // Keeps us well inside the model's limit so responses never truncate.
+          const modelCap = MODEL_OUTPUT_CAPS[fastModel] ?? 8000
+          const estimatedNeed = batchKeywords.length * TOKENS_PER_KEYWORD + PER_REQUEST_OVERHEAD_TOKENS
+          const batchMaxTokens = Math.min(modelCap, estimatedNeed)
+
+          // Hard timeout per attempt — prevents hangs from escaping to the
+          // upstream layer (which would emit a non-JSON error page). Sized for
+          // ~250-keyword batches on Gemini 3.1 Flash Lite (~45K output tokens),
+          // which can legitimately take 2–4 minutes of streaming. Keep under
+          // the route-level maxDuration (300s) to guarantee we emit JSON first.
+          const ANALYZE_TIMEOUT_MS = 240_000
+          let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+          const result = await Promise.race([
+            aiClient.chatCompletionWithFallback(
+              {
+                messages: [
+                  {
+                    role: 'system',
+                    content: `You are a keyword analysis expert for IT training courses. Analyze keywords for relevance and commercial potential.
 
 CRITICAL OUTPUT REQUIREMENTS:
 1. Return ONLY valid JSON - no markdown, no code blocks, no extra text
@@ -210,19 +265,29 @@ CRITICAL OUTPUT REQUIREMENTS:
 4. Do NOT skip any keywords - every single input keyword must appear in your output
 5. Ensure the JSON is complete with proper closing brackets
 6. If a keyword seems irrelevant, still include it with action: "EXCLUDE" and provide exclusionReason`
-                },
-                {
-                  role: 'user',
-                  content: filledPrompt
-                }
-              ],
-              temperature: 0.2,  // Lower temperature for more consistent JSON output
-              maxTokens: 45000,  // Gemini 2.5 Flash supports up to 65K, using 45K for safety
-              jsonMode: true,
-              model: fastModel
-            },
-            { provider: preferredProvider }
-          )
+                  },
+                  {
+                    role: 'user',
+                    content: filledPrompt
+                  }
+                ],
+                temperature: 0.2,
+                maxTokens: batchMaxTokens,
+                jsonMode: true,
+                model: fastModel,
+                signal: request.signal,
+              },
+              { provider: preferredProvider }
+            ),
+            new Promise<never>((_, reject) => {
+              timeoutHandle = setTimeout(
+                () => reject(new Error(`AI call timed out after ${ANALYZE_TIMEOUT_MS / 1000}s`)),
+                ANALYZE_TIMEOUT_MS
+              )
+            })
+          ]).finally(() => {
+            if (timeoutHandle) clearTimeout(timeoutHandle)
+          })
 
           const responseText = result.content
           console.log(`[ANALYZE] ${batchLabel} Response from ${result.provider} (${result.model})`)
@@ -313,36 +378,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                   priority: analyzed.priority
                 } as AnalyzedKeyword
               } else {
-                // AI skipped this keyword - mark for manual review with neutral scores
-                const competitionBonus = original.competition === 'LOW' ? 10 : original.competition === 'MEDIUM' ? 5 : 0
-                const baseScore = 45 // Neutral score
-                return {
-                  keyword: original.keyword,
-                  avgMonthlySearches: original.avgMonthlySearches,
-                  competition: original.competition,
-                  competitionIndex: original.competitionIndex,
-                  lowTopOfPageBidMicros: original.lowTopOfPageBidMicros,
-                  highTopOfPageBidMicros: original.highTopOfPageBidMicros,
-                  inAccount: original.inAccount,
-                  courseRelevance: 5,
-                  relevanceStatus: 'RELATED' as const,
-                  conversionPotential: 5,
-                  searchIntent: 5,
-                  vendorSpecificity: 5,
-                  keywordSpecificity: 5,
-                  actionWordStrength: 5,
-                  commercialSignals: 5,
-                  negativeSignals: 8,
-                  koenigFit: 5,
-                  baseScore,
-                  competitionBonus,
-                  finalScore: baseScore + competitionBonus,
-                  tier: 'Review' as const,
-                  matchType: 'PHRASE' as const,
-                  action: 'REVIEW' as const,
-                  exclusionReason: undefined,
-                  priority: '🔵 REVIEW' as const
-                } as AnalyzedKeyword
+                return buildReviewFallback(original)
               }
             })
 
@@ -356,35 +392,7 @@ CRITICAL OUTPUT REQUIREMENTS:
 
           // If no AI response, mark ALL keywords for review
           console.warn(`[ANALYZE] ${batchLabel} No analyzedKeywords array - marking all ${batchKeywords.length} for REVIEW`)
-          return batchKeywords.map(original => {
-            const competitionBonus = original.competition === 'LOW' ? 10 : original.competition === 'MEDIUM' ? 5 : 0
-            return {
-              keyword: original.keyword,
-              avgMonthlySearches: original.avgMonthlySearches,
-              competition: original.competition,
-              competitionIndex: original.competitionIndex,
-              lowTopOfPageBidMicros: original.lowTopOfPageBidMicros,
-              highTopOfPageBidMicros: original.highTopOfPageBidMicros,
-              inAccount: original.inAccount,
-              courseRelevance: 5,
-              relevanceStatus: 'RELATED' as const,
-              conversionPotential: 5,
-              searchIntent: 5,
-              vendorSpecificity: 5,
-              keywordSpecificity: 5,
-              actionWordStrength: 5,
-              commercialSignals: 5,
-              negativeSignals: 8,
-              koenigFit: 5,
-              baseScore: 45,
-              competitionBonus,
-              finalScore: 45 + competitionBonus,
-              tier: 'Review' as const,
-              matchType: 'PHRASE' as const,
-              action: 'REVIEW' as const,
-              priority: '🔵 REVIEW' as const
-            } as AnalyzedKeyword
-          })
+          return batchKeywords.map(buildReviewFallback)
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error)
           console.error(`[ANALYZE] ${batchLabel} Error:`, errorMessage)
@@ -413,17 +421,53 @@ CRITICAL OUTPUT REQUIREMENTS:
 
     console.log(`[ANALYZE] Processing ${keywords.length} keywords in ${batches.length} batch(es)`)
 
-    // Process batches (parallel for speed, but limit to 2 concurrent to avoid rate limits)
-    const allAnalyzedKeywords: AnalyzedKeyword[] = []
-    const CONCURRENT_BATCHES = 2
+    // Process batches in waves of CONCURRENT_BATCHES. Per-batch failures become
+    // REVIEW-scored fallbacks so the course always returns a complete keyword set.
+    // 6 concurrent × 150-kw batches × ~45 s per AI call ≈ ~60 s wall for 4K keywords.
+    // OpenRouter Gemini 3.1 Flash Lite Preview handles 6 concurrent comfortably on paid tier.
+    const CONCURRENT_BATCHES = 6
+    const allAnalyzedKeywords: AnalyzedKeyword[] = new Array(keywords.length)
+    const warnings: string[] = []
 
-    for (let i = 0; i < batches.length; i += CONCURRENT_BATCHES) {
-      const batchChunk = batches.slice(i, i + CONCURRENT_BATCHES)
-      const results = await Promise.all(
-        batchChunk.map((batch, idx) => processBatch(batch, i + idx, batches.length))
-      )
-      results.forEach(result => allAnalyzedKeywords.push(...result))
+    const processBatchOrFallback = async (batch: KeywordIdea[], idx: number): Promise<{ idx: number; result: AnalyzedKeyword[] }> => {
+      try {
+        const r = await processBatch(batch, idx, batches.length)
+        return { idx, result: r }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const warning = `Batch ${idx + 1}/${batches.length} failed: ${msg}`
+        console.error(`[ANALYZE] ${warning}`)
+        warnings.push(warning)
+        return { idx, result: batch.map(buildReviewFallback) }
+      }
     }
+
+    for (let waveStart = 0; waveStart < batches.length; waveStart += CONCURRENT_BATCHES) {
+      if (request.signal.aborted) {
+        console.log(`[ANALYZE] Aborted by client at batch ${waveStart + 1}/${batches.length}`)
+        return NextResponse.json({
+          success: false,
+          error: 'Aborted by client',
+          meta: { processingTimeMs: Date.now() - startTime }
+        }, { status: 499 })
+      }
+      const wave = batches.slice(waveStart, waveStart + CONCURRENT_BATCHES)
+      const waveResults = await Promise.all(
+        wave.map((batch, offset) => processBatchOrFallback(batch, waveStart + offset))
+      )
+      // Preserve keyword order by splicing each batch result back into its slot.
+      for (const { idx, result } of waveResults) {
+        const writeAt = idx * MAX_KEYWORDS_PER_BATCH
+        for (let j = 0; j < result.length; j++) {
+          allAnalyzedKeywords[writeAt + j] = result[j]
+        }
+      }
+    }
+
+    // Compact any gaps (last batch may be shorter than MAX_KEYWORDS_PER_BATCH, leaving sparse slots)
+    const compactedAnalyzed = allAnalyzedKeywords.filter(Boolean)
+    allAnalyzedKeywords.length = 0
+    allAnalyzedKeywords.push(...compactedAnalyzed)
 
     // If no keywords were analyzed, return error
     if (allAnalyzedKeywords.length === 0) {
@@ -460,7 +504,8 @@ CRITICAL OUTPUT REQUIREMENTS:
       meta: {
         processingTimeMs,
         batchCount: batches.length,
-        keywordsPerBatch: MAX_KEYWORDS_PER_BATCH
+        keywordsPerBatch: MAX_KEYWORDS_PER_BATCH,
+        ...(warnings.length > 0 ? { warnings } : {}),
       }
     })
 
@@ -471,10 +516,19 @@ CRITICAL OUTPUT REQUIREMENTS:
     console.error(`[ANALYZE] FATAL ERROR after ${processingTimeMs}ms:`, errorMessage)
     console.error('[ANALYZE] ========================================')
 
-    return NextResponse.json({
-      success: false,
-      error: `Analysis failed: ${errorMessage}`,
-      meta: { processingTimeMs }
-    }, { status: 500 })
+    // Double-wrapped: even if NextResponse.json itself throws (circular data, etc.),
+    // we still emit a valid application/json body so the client never sees HTML.
+    try {
+      return NextResponse.json({
+        success: false,
+        error: `Analysis failed: ${errorMessage}`,
+        meta: { processingTimeMs }
+      }, { status: 500 })
+    } catch {
+      return new NextResponse(
+        JSON.stringify({ success: false, error: 'Analysis crashed' }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      )
+    }
   }
 }
