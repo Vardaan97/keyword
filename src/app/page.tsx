@@ -38,6 +38,22 @@ function formatTime(ms: number): string {
   return `${mins}:${secs.toString().padStart(2, '0')}`
 }
 
+// Read response as text first, then JSON.parse. On non-JSON, throw an Error
+// containing HTTP status + body preview so the UI surfaces the real upstream
+// failure (e.g. Next.js "An error occurred..." page) instead of a misleading
+// "Failed to execute 'json' on 'Response'" parser error.
+async function parseJsonResponse<T>(res: Response, label: string): Promise<T> {
+  const text = await res.text()
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    const preview = text.slice(0, 300).replace(/\s+/g, ' ').trim()
+    throw new Error(
+      `${label} returned non-JSON (HTTP ${res.status}): ${preview}${text.length > 300 ? '…' : ''}`
+    )
+  }
+}
+
 // Create initial processing steps
 function createProcessingSteps(): ProcessingStep[] {
   return [
@@ -810,7 +826,11 @@ export default function Home() {
         }),
         signal
       })
-      const analyzeResult = await analyzeResponse.json()
+      const analyzeResult = await parseJsonResponse<{
+        success: boolean
+        error?: string
+        data?: { analyzedKeywords: AnalyzedKeyword[] }
+      }>(analyzeResponse, 'Analyze API')
 
       if (!analyzeResult.success) {
         const errorMsg = getErrorMessage(analyzeResult.error)
@@ -830,7 +850,7 @@ export default function Home() {
 
       updatedItem = {
         ...updatedItem,
-        analyzedKeywords: analyzeResult.data.analyzedKeywords,
+        analyzedKeywords: analyzeResult.data?.analyzedKeywords || [],
         status: 'completed',
         endTime,
         processingTimeMs: processingTime
@@ -1383,39 +1403,122 @@ export default function Home() {
       console.log(`[STEP 3] Pre-filter: ${totalKeywords} total -> ${forAI.length} for AI, ${preExcluded.length} excluded by rules`)
 
       let analyzedFromAI: AnalyzedKeyword[] = []
+      let aiWarnings: string[] = []
 
       // Only call AI if we have keywords to analyze
       if (forAI.length > 0) {
-        console.log(`[STEP 3] Sending ${forAI.length} keywords to AI for analysis...`)
+        // Client-side chunking: splits into ~100-keyword chunks and fires up to 8
+        // in parallel against /api/keywords/analyze. Each chunk response updates
+        // progress in real time so the user sees "Analyzed 1200/3972 (12/40 batches)".
+        // Benefits:
+        //   - Wall time ~= ceil(chunks/concurrency) × per-chunk-latency (~30s)
+        //   - User sees progress every few seconds instead of waiting 4 min blind
+        //   - Per-chunk abort (each fetch has its own signal)
+        //   - A failed chunk yields REVIEW fallbacks without killing the course
+        const CHUNK_SIZE = 100
+        const CONCURRENT_CHUNKS = 10
+        const chunks: KeywordIdea[][] = []
+        for (let i = 0; i < forAI.length; i += CHUNK_SIZE) chunks.push(forAI.slice(i, i + CHUNK_SIZE))
 
-        const analyzeResponse = await fetch('/api/keywords/analyze', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt: analysisPrompt.prompt,
-            courseName: item.courseInput.courseName,
-            certificationCode: item.courseInput.certificationCode,
-            vendor: item.courseInput.primaryVendor,
-            relatedTerms: item.courseInput.relatedTerms?.join(', '),
-            keywords: forAI
-          }),
-          signal
-        })
-        const analyzeResult = await analyzeResponse.json()
+        console.log(`[STEP 3] Sending ${forAI.length} keywords to AI in ${chunks.length} chunks (${CONCURRENT_CHUNKS} concurrent)`)
+        updateProgress('analyze', 'in_progress', `Analyzing with AI: 0/${forAI.length} (0/${chunks.length} batches)`, 5)
 
-        if (!analyzeResult.success) {
-          const errorMsg = getErrorMessage(analyzeResult.error)
-          updateProgress('analyze', 'error', errorMsg)
-          throw new Error(errorMsg)
+        const results: (AnalyzedKeyword[] | null)[] = new Array(chunks.length).fill(null)
+        // Partial-results stream: anytime a chunk lands, push a combined snapshot into
+        // this course's state so the user can open the analyzed view mid-run.
+        const streamPartialResults = () => {
+          const partialAnalyzed: AnalyzedKeyword[] = []
+          for (const r of results) if (r) partialAnalyzed.push(...r)
+          setBatchItems(prev => prev.map(x => x.id === item.id ? {
+            ...x,
+            analyzedKeywords: [...partialAnalyzed, ...preExcluded],
+          } : x))
+        }
+        let completedBatches = 0
+        let analyzedCountSoFar = 0
+
+        const runChunk = async (chunk: KeywordIdea[], idx: number): Promise<void> => {
+          if (signal.aborted) throw new Error('Processing stopped by user')
+          try {
+            const res = await fetch('/api/keywords/analyze', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                prompt: analysisPrompt.prompt,
+                courseName: item.courseInput.courseName,
+                certificationCode: item.courseInput.certificationCode,
+                vendor: item.courseInput.primaryVendor,
+                relatedTerms: item.courseInput.relatedTerms?.join(', '),
+                keywords: chunk,
+              }),
+              signal,
+            })
+            const parsed = await parseJsonResponse<{
+              success: boolean
+              error?: string
+              data?: { analyzedKeywords: AnalyzedKeyword[] }
+              meta?: { warnings?: string[] }
+            }>(res, `Analyze chunk ${idx + 1}/${chunks.length}`)
+            if (!parsed.success) {
+              aiWarnings.push(`Chunk ${idx + 1}: ${parsed.error || 'unknown error'}`)
+              results[idx] = null
+            } else {
+              results[idx] = parsed.data?.analyzedKeywords || []
+              if (parsed.meta?.warnings) aiWarnings.push(...parsed.meta.warnings)
+            }
+          } catch (err) {
+            if (signal.aborted) throw err
+            aiWarnings.push(`Chunk ${idx + 1}: ${err instanceof Error ? err.message : String(err)}`)
+            results[idx] = null
+          }
+          completedBatches++
+          analyzedCountSoFar += chunk.length
+          updateProgress('analyze', 'in_progress', `Analyzing with AI: ${analyzedCountSoFar}/${forAI.length} (${completedBatches}/${chunks.length} batches)`, 5)
+          // Stream the partial results into course state so the user can peek mid-run.
+          streamPartialResults()
         }
 
-        analyzedFromAI = analyzeResult.data?.analyzedKeywords || []
+        // Process chunks through a fixed-concurrency worker pool rather than wave-based,
+        // so a slow chunk doesn't block the whole wave.
+        let nextIdx = 0
+        const workers: Promise<void>[] = []
+        const spawn = async (): Promise<void> => {
+          while (nextIdx < chunks.length) {
+            const myIdx = nextIdx++
+            await runChunk(chunks[myIdx], myIdx)
+          }
+        }
+        for (let w = 0; w < Math.min(CONCURRENT_CHUNKS, chunks.length); w++) workers.push(spawn())
+        await Promise.all(workers)
+
+        // Flatten results, filling holes with REVIEW-scored keywords from the original chunk
+        // so the final output always covers the full input set in input order.
+        for (let i = 0; i < chunks.length; i++) {
+          if (results[i]) {
+            analyzedFromAI.push(...(results[i] as AnalyzedKeyword[]))
+          } else {
+            // Chunk failed — synthesize REVIEW fallbacks client-side to preserve coverage.
+            for (const kw of chunks[i]) {
+              const competitionBonus = kw.competition === 'LOW' ? 10 : kw.competition === 'MEDIUM' ? 5 : 0
+              analyzedFromAI.push({
+                ...kw,
+                courseRelevance: 5, relevanceStatus: 'RELATED', conversionPotential: 5,
+                searchIntent: 5, vendorSpecificity: 5, keywordSpecificity: 5,
+                actionWordStrength: 5, commercialSignals: 5, negativeSignals: 8, koenigFit: 5,
+                baseScore: 45, competitionBonus, finalScore: 45 + competitionBonus,
+                tier: 'Review', matchType: 'PHRASE', action: 'REVIEW', priority: '🔵 REVIEW',
+              })
+            }
+          }
+        }
       }
 
       // Combine AI results with pre-excluded keywords
       const allAnalyzed = [...analyzedFromAI, ...preExcluded]
       const analyzedCount = allAnalyzed.length
-      updateProgress('analyze', 'completed', `Analyzed ${analyzedFromAI.length} keywords (${preExcluded.length} auto-excluded)`)
+      const warningSuffix = aiWarnings.length > 0 ? ` — ${aiWarnings.length} batch warning${aiWarnings.length === 1 ? '' : 's'}` : ''
+      updateProgress('analyze', 'completed', `Analyzed ${analyzedFromAI.length} keywords (${preExcluded.length} auto-excluded)${warningSuffix}`)
+      if (aiWarnings.length > 0) console.warn('[STEP 3] AI warnings:', aiWarnings)
 
       // ========== STEP 6: Complete ==========
       const endTime = Date.now()
@@ -2131,8 +2234,9 @@ export default function Home() {
                   </tr>
                 </thead>
                 <tbody>
-                  {selectedItem.keywordIdeas
+                  {[...selectedItem.keywordIdeas]
                     .sort((a, b) => b.avgMonthlySearches - a.avgMonthlySearches)
+                    .slice(0, 1000)
                     .map((kw, index) => (
                     <tr key={index} className="border-b border-[var(--border-subtle)] hover:bg-[var(--bg-hover)]">
                       <td className="py-3 px-4 text-sm text-[var(--text-muted)] font-mono">{index + 1}</td>
@@ -3253,19 +3357,26 @@ export default function Home() {
                         </tbody>
                       </table>
                       {hasMore && (
-                        <div className="sticky bottom-0 flex items-center justify-center gap-2 py-3 bg-[var(--bg-secondary)]/90 backdrop-blur border-t border-[var(--border-subtle)]">
-                          <button
-                            onClick={() => setVisibleCount(prev => Math.min(prev + 200, sortedKeywords.length))}
-                            className="px-4 py-2 text-sm font-medium text-[var(--accent-electric)] hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
-                          >
-                            Show more ({sortedKeywords.length - visibleCount} remaining)
-                          </button>
-                          <button
-                            onClick={() => setVisibleCount(sortedKeywords.length)}
-                            className="px-4 py-2 text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
-                          >
-                            Show all
-                          </button>
+                        <div className="sticky bottom-0 flex flex-col items-center gap-1 py-3 bg-[var(--bg-secondary)]/90 backdrop-blur border-t border-[var(--border-subtle)]">
+                          <div className="flex items-center justify-center gap-2">
+                            <button
+                              onClick={() => setVisibleCount(prev => Math.min(prev + 500, sortedKeywords.length))}
+                              className="px-4 py-2 text-sm font-medium text-[var(--accent-electric)] hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
+                            >
+                              Show more ({sortedKeywords.length - visibleCount} remaining)
+                            </button>
+                            <button
+                              onClick={() => setVisibleCount(Math.min(sortedKeywords.length, 1000))}
+                              className="px-4 py-2 text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
+                            >
+                              Show up to 1000
+                            </button>
+                          </div>
+                          {sortedKeywords.length > 1000 && (
+                            <p className="text-xs text-[var(--text-muted)]">
+                              Rendering more than 1000 rows can freeze the browser — export the CSV to see all {sortedKeywords.length.toLocaleString()} keywords.
+                            </p>
+                          )}
                         </div>
                       )}
                     </div>
