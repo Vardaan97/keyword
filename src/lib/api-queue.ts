@@ -390,21 +390,114 @@ class ApiQueueManager {
   }
 
   /**
-   * Report failed request (for adaptive delay)
+   * Report failed request (for adaptive delay).
+   *
+   * Accepts either the legacy `isQuotaError: boolean` form (kept for backward compatibility
+   * with existing callers) OR a structured ApiErrorResponse. When a structured error is
+   * passed, the behavior branches by `type`:
+   *   - RATE_LIMITED: honor retryAfterMs if present; bump adaptive delay
+   *   - QUOTA_EXHAUSTED: trigger 5-min cooldown
+   *   - OVERLOAD: retry without future slowdown (don't bump adaptiveDelayMs)
+   *   - NETWORK: retry once with existing delay
+   *   - AUTH: surface, don't retry
    */
-  reportFailure(isQuotaError: boolean): void {
+  reportFailure(errorOrIsQuota: boolean | {
+    type: 'QUOTA_EXHAUSTED' | 'RATE_LIMITED' | 'OVERLOAD' | 'AUTH' | 'NETWORK' | 'VALIDATION' | 'UNKNOWN'
+    retryAfterMs?: number
+  }): void {
     this.consecutiveFailures++
     this.consecutiveSuccesses = 0
 
-    // Increase delay on failures
-    this.adaptiveDelayMs = Math.min(
-      this.adaptiveDelayMs * DELAY_INCREASE_FACTOR,
-      ADAPTIVE_DELAY_MAX_MS
-    )
-    console.log(`[QUEUE] Increased delay to ${this.adaptiveDelayMs.toFixed(0)}ms after failure`)
+    // Legacy boolean signature
+    if (typeof errorOrIsQuota === 'boolean') {
+      this.adaptiveDelayMs = Math.min(
+        this.adaptiveDelayMs * DELAY_INCREASE_FACTOR,
+        ADAPTIVE_DELAY_MAX_MS
+      )
+      console.log(`[QUEUE] Increased delay to ${this.adaptiveDelayMs.toFixed(0)}ms after failure`)
+      if (errorOrIsQuota) {
+        this.handleQuotaExhausted()
+      }
+      return
+    }
 
-    if (isQuotaError) {
-      this.handleQuotaExhausted()
+    // Structured error
+    const { type, retryAfterMs } = errorOrIsQuota
+
+    switch (type) {
+      case 'QUOTA_EXHAUSTED':
+        this.handleQuotaExhausted()
+        return
+
+      case 'RATE_LIMITED':
+        if (retryAfterMs && retryAfterMs >= 5_000) {
+          // Honor explicit Retry-After — pause for that duration instead of just nudging the delay.
+          console.log(`[QUEUE] Rate-limited. Honoring Retry-After: ${(retryAfterMs / 1000).toFixed(1)}s`)
+          this.pause('quota_exhausted', Math.min(retryAfterMs, QUOTA_COOLDOWN_MS))
+          this.emitEvent('quota_exhausted', { reason: 'rate_limited', resumeAt: this.resumeAt })
+          return
+        }
+        this.adaptiveDelayMs = Math.min(
+          this.adaptiveDelayMs * DELAY_INCREASE_FACTOR,
+          ADAPTIVE_DELAY_MAX_MS
+        )
+        console.log(`[QUEUE] Rate-limited (no Retry-After). Bumped delay to ${this.adaptiveDelayMs.toFixed(0)}ms`)
+        return
+
+      case 'OVERLOAD':
+        // Transient provider issue — don't bump adaptive delay for future requests.
+        console.log(`[QUEUE] Transient overload (503/504). Retry without future slowdown.`)
+        return
+
+      case 'NETWORK':
+        // Connectivity blip — retry once with existing delay, no future slowdown.
+        console.log(`[QUEUE] Network error. Retry once with existing delay.`)
+        return
+
+      case 'AUTH':
+        console.error(`[QUEUE] Auth error — not retrying.`)
+        return
+
+      default:
+        // VALIDATION / UNKNOWN — bump delay defensively.
+        this.adaptiveDelayMs = Math.min(
+          this.adaptiveDelayMs * DELAY_INCREASE_FACTOR,
+          ADAPTIVE_DELAY_MAX_MS
+        )
+        console.log(`[QUEUE] ${type} error. Bumped delay to ${this.adaptiveDelayMs.toFixed(0)}ms`)
+    }
+  }
+
+  // ============================================
+  // PER-CUSTOMER-ID MUTEX
+  // ============================================
+  // Google Ads rate-limit is 1 req/sec PER customer ID, not global. The old global
+  // mutex serialized all requests which was over-restrictive. This per-customer
+  // mutex lets multiple customers run in parallel while each customer stays serial.
+  //
+  // Usage: const release = await queue.acquireMutex(customerId); try { ... } finally { release() }
+  // When customerId is undefined/empty, acquireMutex is a no-op (for non-Google-Ads calls).
+
+  private customerMutexes: Map<string, Promise<void>> = new Map()
+
+  async acquireMutex(customerId?: string): Promise<() => void> {
+    if (!customerId) {
+      return () => {}
+    }
+    const prior = this.customerMutexes.get(customerId) ?? Promise.resolve()
+    let releaseFn: () => void = () => {}
+    const current = new Promise<void>((resolve) => {
+      releaseFn = resolve
+    })
+    this.customerMutexes.set(customerId, prior.then(() => current))
+
+    await prior
+    return () => {
+      releaseFn()
+      // If no newer acquire has happened, clean up the map entry.
+      if (this.customerMutexes.get(customerId) === prior.then(() => current)) {
+        this.customerMutexes.delete(customerId)
+      }
     }
   }
 
@@ -438,17 +531,35 @@ class ApiQueueManager {
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      const isQuotaError = errorMessage.toLowerCase().includes('quota') ||
-                          errorMessage.toLowerCase().includes('exhausted') ||
-                          errorMessage.includes('RESOURCE_EXHAUSTED')
+
+      // Classify the error so we can branch behavior (quota vs rate-limit vs overload vs network).
+      // classifyError lives in google-ads.ts; import lazily via require to avoid circular deps.
+      // We fall back to the legacy string-match if the import ever fails.
+      let classified: {
+        type: 'QUOTA_EXHAUSTED' | 'RATE_LIMITED' | 'OVERLOAD' | 'AUTH' | 'NETWORK' | 'VALIDATION' | 'UNKNOWN'
+        retryAfterMs?: number
+      }
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { classifyError } = require('./google-ads') as typeof import('./google-ads')
+        classified = classifyError(error)
+      } catch {
+        // Fallback: legacy string match
+        const lower = errorMessage.toLowerCase()
+        const isQuota = lower.includes('quota') || lower.includes('exhausted') || errorMessage.includes('RESOURCE_EXHAUSTED')
+        classified = { type: isQuota ? 'QUOTA_EXHAUSTED' : 'UNKNOWN' }
+      }
+      const isQuotaError = classified.type === 'QUOTA_EXHAUSTED'
+      // RATE_LIMITED + OVERLOAD + NETWORK are retryable; AUTH is not; UNKNOWN/VALIDATION fall through to legacy path.
+      const isRetryable = classified.type === 'RATE_LIMITED' || classified.type === 'OVERLOAD' || classified.type === 'NETWORK'
 
       request.retryCount++
 
-      if (request.retryCount < MAX_RETRIES && !isQuotaError) {
+      if (request.retryCount < MAX_RETRIES && !isQuotaError && (isRetryable || classified.type === 'UNKNOWN')) {
         // Retry the request
-        console.log(`[QUEUE] Retrying ${request.courseName} (attempt ${request.retryCount + 1})`)
+        console.log(`[QUEUE] Retrying ${request.courseName} (attempt ${request.retryCount + 1}, type=${classified.type})`)
         request.status = 'pending'
-        this.reportFailure(false)
+        this.reportFailure(classified)
       } else {
         // Mark as failed
         request.status = 'failed'
@@ -456,9 +567,9 @@ class ApiQueueManager {
         request.completedAt = Date.now()
         this.failedRequests++
 
-        this.reportFailure(isQuotaError)
+        this.reportFailure(classified)
         this.emitEvent('request_error', request)
-        console.error(`[QUEUE] Failed ${request.courseName}: ${errorMessage}`)
+        console.error(`[QUEUE] Failed ${request.courseName} (type=${classified.type}): ${errorMessage}`)
       }
     }
 
@@ -466,8 +577,12 @@ class ApiQueueManager {
   }
 
   private async adaptiveDelay(): Promise<void> {
-    const delay = this.adaptiveDelayMs
-    console.log(`[QUEUE] Waiting ${delay.toFixed(0)}ms before next request`)
+    const base = this.adaptiveDelayMs
+    // ±20% jitter avoids thundering-herd when multiple workers (concurrent courses)
+    // hit rate limits simultaneously and all back off to the same delay.
+    const jitter = base * (Math.random() - 0.5) * 0.4
+    const delay = Math.max(0, base + jitter)
+    console.log(`[QUEUE] Waiting ${delay.toFixed(0)}ms (base ${base.toFixed(0)}ms, jitter ${jitter >= 0 ? '+' : ''}${jitter.toFixed(0)}ms)`)
     await new Promise(resolve => setTimeout(resolve, delay))
   }
 

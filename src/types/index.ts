@@ -229,10 +229,15 @@ export interface SelectableKeyword extends AnalyzedKeyword {
 // ============================================
 
 // Structured API error response for better error handling
+// OVERLOAD = transient provider-side overload (503/504/UNAVAILABLE) — retry without future slowdown.
+// NETWORK = client-side connectivity (ECONNRESET/ETIMEDOUT/fetch failed) — retry once.
+// RATE_LIMITED = explicit 429 — honor Retry-After header if present.
+// QUOTA_EXHAUSTED = daily/monthly quota burned — long cooldown (5 min default).
 export interface ApiErrorResponse {
-  type: 'QUOTA_EXHAUSTED' | 'RATE_LIMITED' | 'AUTH' | 'NETWORK' | 'VALIDATION' | 'UNKNOWN'
+  type: 'QUOTA_EXHAUSTED' | 'RATE_LIMITED' | 'OVERLOAD' | 'AUTH' | 'NETWORK' | 'VALIDATION' | 'UNKNOWN'
   message: string
-  retryAfter?: number  // seconds until retry is allowed
+  retryAfter?: number   // seconds until retry is allowed (legacy; prefer retryAfterMs)
+  retryAfterMs?: number // milliseconds — parsed from Retry-After header when available
   isRetryable: boolean
   accountId?: string   // affected account (for quota errors)
   details?: string     // additional context

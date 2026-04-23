@@ -264,11 +264,42 @@ class AIClient {
       }
     } catch (error: unknown) {
       // Surface HTTP status from the SDK so callers can log 400 vs 429 vs 504 clearly.
-      const e = error as { status?: number; message?: string; error?: { message?: string } }
+      // Preserve `headers` on the rethrown error so downstream classifiers (api-queue,
+      // google-ads.classifyError) can parse the Retry-After header for 429 responses.
+      const e = error as {
+        status?: number
+        message?: string
+        error?: { message?: string }
+        headers?: Record<string, string> | Headers
+      }
       const status = e?.status ? `HTTP ${e.status}` : ''
       const msg = e?.error?.message || e?.message || String(error)
       console.error(`[AI-CLIENT] ${provider} error ${status}:`, msg)
-      throw new Error(`${provider}${status ? ' ' + status : ''}: ${msg}`)
+
+      // Emit a retry-after hint when we can see one, so callers don't have to introspect the original error shape.
+      let retryAfterHint = ''
+      if (e.headers) {
+        let retryAfter: string | null = null
+        if (typeof (e.headers as Headers).get === 'function') {
+          retryAfter = (e.headers as Headers).get('retry-after')
+        } else {
+          const rec = e.headers as Record<string, string>
+          retryAfter = rec['retry-after'] ?? rec['Retry-After'] ?? null
+        }
+        if (retryAfter) {
+          retryAfterHint = ` (retry-after: ${retryAfter}s)`
+          console.warn(`[AI-CLIENT] ${provider} ${status} Retry-After: ${retryAfter}s`)
+        }
+      }
+
+      // Wrap in an Error that still carries `status` and `headers` so classifyError() can parse them downstream.
+      const wrapped = new Error(`${provider}${status ? ' ' + status : ''}: ${msg}${retryAfterHint}`) as Error & {
+        status?: number
+        headers?: Record<string, string> | Headers
+      }
+      wrapped.status = e.status
+      wrapped.headers = e.headers
+      throw wrapped
     }
   }
 

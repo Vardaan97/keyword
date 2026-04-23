@@ -197,11 +197,98 @@ export function getRateLimitStatus(): Record<string, {
 // ============================================================================
 
 /**
- * Classify an error message into a structured error type
+ * Parse a Retry-After header value — supports either seconds (e.g. "30") or an HTTP-date.
+ * Returns milliseconds to wait, or undefined if not parseable.
+ */
+export function parseRetryAfterHeader(headerValue: string | undefined | null): number | undefined {
+  if (!headerValue) return undefined
+  const trimmed = String(headerValue).trim()
+  // Numeric seconds form
+  const asInt = Number.parseInt(trimmed, 10)
+  if (Number.isFinite(asInt) && asInt >= 0) {
+    return asInt * 1000
+  }
+  // HTTP-date form
+  const asDate = Date.parse(trimmed)
+  if (Number.isFinite(asDate)) {
+    const delta = asDate - Date.now()
+    return delta > 0 ? delta : 0
+  }
+  return undefined
+}
+
+/**
+ * Extract Retry-After from an error's attached headers or Google Ads RetryInfo blob.
+ * Accepts the shape emitted by both `fetch()` wrappers and OpenAI SDK APIError.
+ */
+export function extractRetryAfterMs(err: unknown): number | undefined {
+  if (!err || typeof err !== 'object') return undefined
+  const e = err as {
+    headers?: Record<string, string> | { get?: (k: string) => string | null } | Headers
+    response?: { headers?: Record<string, string> | Headers }
+    status?: number
+    error?: { details?: Array<{ '@type'?: string; retryDelay?: { seconds?: number; nanos?: number } }> }
+  }
+
+  // Attempt 1: direct headers on the error
+  const headers = e.headers
+  if (headers) {
+    if (typeof (headers as Headers).get === 'function') {
+      const v = (headers as Headers).get('retry-after')
+      const ms = parseRetryAfterHeader(v)
+      if (ms !== undefined) return ms
+    } else if (typeof headers === 'object') {
+      const rec = headers as Record<string, string>
+      const v = rec['retry-after'] ?? rec['Retry-After'] ?? rec['RETRY-AFTER']
+      const ms = parseRetryAfterHeader(v)
+      if (ms !== undefined) return ms
+    }
+  }
+
+  // Attempt 2: nested response.headers (common fetch-wrap shape)
+  if (e.response?.headers) {
+    const rh = e.response.headers
+    if (typeof (rh as Headers).get === 'function') {
+      const v = (rh as Headers).get('retry-after')
+      const ms = parseRetryAfterHeader(v)
+      if (ms !== undefined) return ms
+    } else if (typeof rh === 'object') {
+      const rec = rh as Record<string, string>
+      const v = rec['retry-after'] ?? rec['Retry-After']
+      const ms = parseRetryAfterHeader(v)
+      if (ms !== undefined) return ms
+    }
+  }
+
+  // Attempt 3: google.rpc.RetryInfo in error body
+  const details = e.error?.details
+  if (Array.isArray(details)) {
+    for (const d of details) {
+      if (d?.['@type']?.includes('RetryInfo') && d.retryDelay) {
+        const secs = d.retryDelay.seconds ?? 0
+        const nanos = d.retryDelay.nanos ?? 0
+        return secs * 1000 + Math.round(nanos / 1_000_000)
+      }
+    }
+  }
+
+  return undefined
+}
+
+/**
+ * Classify an error into a structured error type.
+ *
+ * Distinguishes:
+ *  - RATE_LIMITED (429)     — honor Retry-After if present
+ *  - QUOTA_EXHAUSTED        — long cooldown
+ *  - OVERLOAD (503/504)     — transient provider-side; retry without future slowdown
+ *  - NETWORK                — client connectivity
+ *  - AUTH (401/403)         — not retryable
  */
 export function classifyError(error: unknown, accountId?: string): ApiErrorResponse {
   const message = error instanceof Error ? error.message : String(error)
   const lowerMessage = message.toLowerCase()
+  const retryAfterMs = extractRetryAfterMs(error)
 
   // Quota exhausted
   if (lowerMessage.includes('quota') || lowerMessage.includes('exhausted') ||
@@ -209,20 +296,26 @@ export function classifyError(error: unknown, accountId?: string): ApiErrorRespo
     return {
       type: 'QUOTA_EXHAUSTED',
       message: 'Google Ads API quota exhausted. The queue will automatically resume when the quota resets.',
-      retryAfter: 5 * 60, // 5 minutes
+      retryAfter: 5 * 60,
+      retryAfterMs: retryAfterMs ?? 5 * 60 * 1000,
       isRetryable: true,
       accountId,
       details: message
     }
   }
 
-  // Rate limited
-  if (lowerMessage.includes('rate') || lowerMessage.includes('limit') ||
-      message.includes('429') || message.includes('RATE_LIMIT_EXCEEDED')) {
+  // Rate limited (429)
+  if (message.includes('429') || message.includes('RATE_LIMIT_EXCEEDED') ||
+      lowerMessage.includes('too many requests') ||
+      // keep old string match but ONLY when not obviously an overload below
+      (lowerMessage.includes('rate') && lowerMessage.includes('limit'))) {
     return {
       type: 'RATE_LIMITED',
-      message: 'Too many requests. Slowing down...',
-      retryAfter: 60, // 1 minute
+      message: retryAfterMs
+        ? `Rate limited. Retrying in ${Math.round(retryAfterMs / 1000)}s (honoring Retry-After).`
+        : 'Too many requests. Slowing down...',
+      retryAfter: retryAfterMs ? Math.round(retryAfterMs / 1000) : 60,
+      retryAfterMs: retryAfterMs ?? 60 * 1000,
       isRetryable: true,
       accountId,
       details: message
@@ -242,15 +335,29 @@ export function classifyError(error: unknown, accountId?: string): ApiErrorRespo
     }
   }
 
-  // Network errors
+  // Overload (transient provider-side; retry without future slowdown)
+  if (message.includes('503') || message.includes('504') ||
+      lowerMessage.includes('service unavailable') || lowerMessage.includes('gateway timeout') ||
+      lowerMessage.includes('unavailable')) {
+    return {
+      type: 'OVERLOAD',
+      message: 'Provider overloaded. Will retry without future slowdown.',
+      retryAfter: retryAfterMs ? Math.round(retryAfterMs / 1000) : 5,
+      retryAfterMs: retryAfterMs ?? 5 * 1000,
+      isRetryable: true,
+      details: message
+    }
+  }
+
+  // Network errors (client-side connectivity)
   if (lowerMessage.includes('network') || lowerMessage.includes('econnreset') ||
       lowerMessage.includes('etimedout') || lowerMessage.includes('enotfound') ||
-      lowerMessage.includes('fetch failed') || message.includes('503') ||
-      message.includes('504')) {
+      lowerMessage.includes('fetch failed') || lowerMessage.includes('socket hang up')) {
     return {
       type: 'NETWORK',
       message: 'Network error. Will retry automatically.',
-      retryAfter: 10, // 10 seconds
+      retryAfter: 10,
+      retryAfterMs: 10 * 1000,
       isRetryable: true,
       details: message
     }
