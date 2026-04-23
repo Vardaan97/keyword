@@ -87,6 +87,12 @@ interface AppState {
   theme: ThemeType
   setTheme: (theme: ThemeType) => void
 
+  // Batch processing: courses to run concurrently (default 2, clamp 1-5).
+  // Parallel speedup is per unique Google Ads customer ID — when many courses
+  // share one account, per-customer mutex serializes them so effective speedup varies.
+  coursesConcurrency: number
+  setCoursesConcurrency: (n: number) => void
+
   // Current Session
   currentSession: ResearchSession | null
   setCurrentSession: (session: ResearchSession | null) => void
@@ -176,6 +182,11 @@ export const useAppStore = create<AppState>()(
       // Theme Settings (default to dark)
       theme: 'dark',
       setTheme: (theme) => set({ theme }),
+
+      // Batch concurrency (default 2; clamp 1-5).
+      coursesConcurrency: 2,
+      setCoursesConcurrency: (n: number) =>
+        set({ coursesConcurrency: Math.max(1, Math.min(5, Math.round(Number(n) || 2))) }),
 
       // Current Session
       currentSession: null,
@@ -340,6 +351,7 @@ export const useAppStore = create<AppState>()(
         selectedGoogleAdsAccountId: state.selectedGoogleAdsAccountId,
         aiProvider: state.aiProvider,
         theme: state.theme,
+        coursesConcurrency: state.coursesConcurrency,
         selectedCreativeTemplateId: state.selectedCreativeTemplateId,
         selectedPlatformSizes: state.selectedPlatformSizes,
         defaultCta: state.defaultCta,

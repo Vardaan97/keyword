@@ -201,7 +201,9 @@ export default function Home() {
     setSavedBatchItems,
     clearSavedBatchItems,
     theme,
-    setTheme
+    setTheme,
+    coursesConcurrency,
+    setCoursesConcurrency
   } = useAppStore()
 
   // Use Convex prompts with versioning
@@ -245,6 +247,8 @@ export default function Home() {
   const [activeView, setActiveView] = useState<'upload' | 'processing' | 'results'>('upload')
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
+  // Non-blocking warning shown when user uploads a CSV > 50 rows. Dismissable.
+  const [csvSizeWarning, setCsvSizeWarning] = useState<string | null>(null)
   const [showPromptEditor, setShowPromptEditor] = useState(false)
   const [editingPrompt, setEditingPrompt] = useState<'seed' | 'analysis' | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -545,6 +549,13 @@ export default function Home() {
         keywordIdeas: [],
         analyzedKeywords: []
       }))
+      // Non-blocking warning for large batches. Shown inline in the processing view
+      // via the csvSizeWarning state. Dismissable.
+      if (items.length > 50) {
+        setCsvSizeWarning(`Large batch (${items.length} courses): smaller runs of 50 or fewer tend to finish faster and are easier to recover if something fails.`)
+      } else {
+        setCsvSizeWarning(null)
+      }
       setBatchItems(items)
       setActiveView('processing')
     } catch (error) {
@@ -1176,49 +1187,50 @@ export default function Home() {
       }
     })
 
-    // Enqueue all items
-    for (const item of pendingItems) {
-      apiQueue.enqueue({
-        courseId: item.id,
-        courseName: item.courseInput.courseName,
-        type: 'fetch_keywords',
-        priority: 1
-      })
+    // Worker-pool concurrent processing: N workers pull from pendingItems via
+    // an atomic nextIdx++ (JS is single-threaded, so nextIdx++ is race-free).
+    // Each worker runs processItemWithDelay in isolation, which is idempotent
+    // across workers — no shared mutable state beyond the item state it updates.
+    // Per-customer-ID mutex inside the fetch-ideas call keeps Google Ads 1-req/sec
+    // honored when multiple courses share one account.
+    const concurrency = Math.max(1, Math.min(5, Math.round(coursesConcurrency || 2)))
+    console.log(`[BATCH] Worker pool: ${concurrency} concurrent courses over ${pendingItems.length} pending items`)
+
+    let nextIdx = 0
+    const spawn = async () => {
+      while (true) {
+        if (controller.signal.aborted || abortRef.current) return
+        const myIdx = nextIdx++
+        if (myIdx >= pendingItems.length) return
+        const item = pendingItems[myIdx]
+
+        try {
+          const processedItem = await processItemWithDelay(item, controller.signal, 0)
+          setBatchItems(prev => prev.map(it => it.id === item.id ? processedItem : it))
+
+          if (processedItem.status === 'completed') {
+            saveCompletedItem(processedItem)
+          }
+
+          // Global quota exhaustion pauses all workers for the cooldown window.
+          if (processedItem.status === 'error' && processedItem.error && isQuotaError(processedItem.error)) {
+            console.warn(`[BATCH] Quota exhausted on ${item.courseInput.courseName} — pausing queue`)
+            apiQueue.handleQuotaExhausted()
+          }
+        } catch (err) {
+          // Per-worker error: log and move on so one bad course doesn't cascade.
+          const msg = err instanceof Error ? err.message : String(err)
+          console.error(`[BATCH] Worker error on ${item.courseInput.courseName}:`, msg)
+          setBatchItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'error' as BatchItemStatus, error: msg } : it))
+        }
+      }
     }
 
-    // Process function that the queue will call for each item
-    const processQueueItem = async (request: { courseId: string }, signal: AbortSignal) => {
-      const item = batchItems.find(it => it.id === request.courseId)
-      if (!item) {
-        throw new Error(`Item not found: ${request.courseId}`)
-      }
-
-      // Check abort
-      if (signal.aborted || abortRef.current) {
-        throw new Error('Processing stopped by user')
-      }
-
-      // Process the item (reuse existing processItemWithDelay but with 0 delay since queue handles timing)
-      const processedItem = await processItemWithDelay(item, signal, 0)
-      setBatchItems(prev => prev.map(it => it.id === item.id ? processedItem : it))
-
-      if (processedItem.status === 'completed') {
-        // Save in background - don't wait for it
-        saveCompletedItem(processedItem)
-      }
-
-      // Check for quota errors in the result
-      if (processedItem.status === 'error' && processedItem.error && isQuotaError(processedItem.error)) {
-        apiQueue.handleQuotaExhausted()
-        throw new Error(processedItem.error)
-      }
-    }
-
-    // Start the queue
     try {
-      await apiQueue.start(processQueueItem)
+      const workerCount = Math.min(concurrency, pendingItems.length)
+      await Promise.all(Array.from({ length: workerCount }, spawn))
     } catch (err) {
-      console.error('[BATCH] Queue processing error:', err)
+      console.error('[BATCH] Worker pool error:', err)
     } finally {
       unsubscribe()
     }
@@ -1455,7 +1467,13 @@ export default function Home() {
       updateProgress('fetch_keywords', 'in_progress', `Fetching from ${dataSource === 'auto' ? 'Google Ads API' : dataSource}...`, 3)
       console.log(`[STEP 2] Fetching keywords for: ${item.courseInput.courseName}`)
 
-      const keywordsResponse = await fetch('/api/keywords/fetch-ideas', {
+      // Per-customer-ID mutex: ensures we don't exceed the 1-req/sec-per-customer
+      // Google Ads limit even when multiple course workers run concurrently.
+      // Different customer IDs (accounts) run in parallel; same-account requests serialize.
+      const releaseMutex = await apiQueue.acquireMutex(selectedGoogleAdsAccountId)
+      let keywordsResponse: Response
+      try {
+        keywordsResponse = await fetch('/api/keywords/fetch-ideas', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1468,6 +1486,9 @@ export default function Home() {
         }),
         signal
       })
+      } finally {
+        releaseMutex()
+      }
       const keywordsResult = await keywordsResponse.json()
 
       if (!keywordsResult.success) {
@@ -2649,6 +2670,33 @@ export default function Home() {
                       ))}
                     </div>
                   </div>
+
+                  {/* Batch Concurrency Slider */}
+                  <div>
+                    <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-2">
+                      Parallel Courses
+                    </label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="range"
+                        min={1}
+                        max={5}
+                        step={1}
+                        value={coursesConcurrency}
+                        onChange={(e) => setCoursesConcurrency(Number(e.target.value))}
+                        disabled={isProcessing}
+                        className="flex-1 accent-[var(--accent-electric)] disabled:opacity-40"
+                      />
+                      <span className="text-sm font-semibold text-[var(--accent-electric)] min-w-[2ch] text-right">
+                        {coursesConcurrency}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-[var(--text-muted)] mt-1 leading-tight">
+                      {coursesConcurrency === 1
+                        ? 'Serial — one course at a time (safest).'
+                        : `${coursesConcurrency} concurrent. Speedup is per unique Google Ads account.`}
+                    </p>
+                  </div>
                 </div>
 
                 {/* Current Selection Summary */}
@@ -2891,6 +2939,23 @@ export default function Home() {
         {/* Processing View */}
         {(activeView === 'processing' || activeView === 'results') && batchItems.length > 0 && (
           <div className="space-y-4">
+            {/* CSV size warning banner — shown when user uploaded > 50 courses */}
+            {csvSizeWarning && (
+              <div className="p-3 rounded-xl border border-[var(--accent-warning)] bg-[var(--accent-warning)]/10 flex items-start justify-between gap-3 text-sm">
+                <div className="flex items-start gap-2">
+                  <span className="text-[var(--accent-warning)] flex-shrink-0 mt-0.5">⚠</span>
+                  <span className="text-[var(--text-primary)]">{csvSizeWarning}</span>
+                </div>
+                <button
+                  onClick={() => setCsvSizeWarning(null)}
+                  className="flex-shrink-0 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  aria-label="Dismiss warning"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             {/* Queue Progress Display - shown during processing */}
             {isProcessing && queueProgress.phase !== 'idle' && (
               <QueueProgressDisplay
