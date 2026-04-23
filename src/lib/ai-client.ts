@@ -5,6 +5,7 @@
 
 import OpenAI from 'openai'
 import { clampMaxTokens } from './model-caps'
+import { estimateCostUsd } from './model-pricing'
 
 export type AIProvider = 'openai' | 'openrouter'
 
@@ -30,6 +31,9 @@ export interface ChatCompletionOptions {
 export interface ChatCompletionResult {
   content: string
   tokensUsed?: number
+  inputTokens?: number
+  outputTokens?: number
+  costUsd?: number
   provider: AIProvider
   model: string
 }
@@ -216,9 +220,14 @@ class AIClient {
       )
 
       const content = completion.choices[0]?.message?.content || ''
+      const inputTokens = completion.usage?.prompt_tokens
+      const outputTokens = completion.usage?.completion_tokens
       const tokensUsed = completion.usage?.total_tokens
+      const costUsd = inputTokens !== undefined && outputTokens !== undefined
+        ? estimateCostUsd(model, inputTokens, outputTokens)
+        : 0
 
-      console.log(`[AI-CLIENT] Response received. Tokens: ${tokensUsed}`)
+      console.log(`[AI-CLIENT] Response received. Tokens: ${tokensUsed ?? 'N/A'} (in: ${inputTokens ?? 'N/A'}, out: ${outputTokens ?? 'N/A'}) · Cost: $${costUsd.toFixed(6)}`)
 
       // Validate JSON response if jsonMode was requested
       if (options.jsonMode && content) {
@@ -232,6 +241,9 @@ class AIClient {
             return {
               content: jsonMatch[0],
               tokensUsed,
+              inputTokens,
+              outputTokens,
+              costUsd,
               provider,
               model,
             }
@@ -244,6 +256,9 @@ class AIClient {
       return {
         content,
         tokensUsed,
+        inputTokens,
+        outputTokens,
+        costUsd,
         provider,
         model,
       }

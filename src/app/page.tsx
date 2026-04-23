@@ -1204,6 +1204,13 @@ export default function Home() {
   ): Promise<BatchCourseItem> => {
     const startTime = Date.now()
 
+    // Admin cost tracking: one runId per course run. Used to group AI calls in run_costs.
+    // Accumulators updated when generate-seeds and analyze responses include meta.costUsd.
+    const runId = `run_${startTime}_${Math.random().toString(36).slice(2, 8)}`
+    let runTotalCostUsd = 0
+    let runTotalInputTokens = 0
+    let runTotalOutputTokens = 0
+
     // Initialize progress tracking
     let progress: ProcessingProgress = {
       currentStep: 0,
@@ -1253,7 +1260,8 @@ export default function Home() {
         prompt: promptToUse,
         courseName: item.courseInput.courseName,
         courseUrl: item.courseInput.courseUrl,
-        vendor: item.courseInput.primaryVendor || 'Not specified'
+        vendor: item.courseInput.primaryVendor || 'Not specified',
+        runId,
       }
 
       console.log(`[STEP 1] Request body:`, JSON.stringify(seedRequestBody, null, 2).substring(0, 500))
@@ -1269,6 +1277,13 @@ export default function Home() {
 
       const seedResult = await seedResponse.json()
       console.log(`[STEP 1] Response:`, seedResult.success ? `Success - ${seedResult.data?.length || 0} seeds` : `Error - ${getErrorMessage(seedResult.error)}`)
+
+      // Accumulate seed-generation cost (admin only — not shown to team)
+      if (seedResult?.meta?.costUsd !== undefined) {
+        runTotalCostUsd += seedResult.meta.costUsd || 0
+        runTotalInputTokens += seedResult.meta.inputTokens || 0
+        runTotalOutputTokens += seedResult.meta.outputTokens || 0
+      }
 
       if (!seedResult.success) {
         const errorMsg = getErrorMessage(seedResult.error) || 'Unknown error generating seeds'
@@ -1450,6 +1465,7 @@ export default function Home() {
                 vendor: item.courseInput.primaryVendor,
                 relatedTerms: item.courseInput.relatedTerms?.join(', '),
                 keywords: chunk,
+                runId,
               }),
               signal,
             })
@@ -1457,7 +1473,12 @@ export default function Home() {
               success: boolean
               error?: string
               data?: { analyzedKeywords: AnalyzedKeyword[] }
-              meta?: { warnings?: string[] }
+              meta?: {
+                warnings?: string[]
+                costUsd?: number
+                inputTokens?: number
+                outputTokens?: number
+              }
             }>(res, `Analyze chunk ${idx + 1}/${chunks.length}`)
             if (!parsed.success) {
               aiWarnings.push(`Chunk ${idx + 1}: ${parsed.error || 'unknown error'}`)
@@ -1465,6 +1486,12 @@ export default function Home() {
             } else {
               results[idx] = parsed.data?.analyzedKeywords || []
               if (parsed.meta?.warnings) aiWarnings.push(...parsed.meta.warnings)
+              // Accumulate analyze-chunk cost (admin only — not shown to team)
+              if (parsed.meta?.costUsd !== undefined) {
+                runTotalCostUsd += parsed.meta.costUsd || 0
+                runTotalInputTokens += parsed.meta.inputTokens || 0
+                runTotalOutputTokens += parsed.meta.outputTokens || 0
+              }
             }
           } catch (err) {
             if (signal.aborted) throw err
@@ -1552,6 +1579,16 @@ export default function Home() {
         endTime: Date.now(),
         processingTimeMs: Date.now() - startTime
       }
+    }
+
+    // Admin cost summary (admin-only — not shown in team-facing UI)
+    // Logged here whether the run succeeded or errored, so partial runs are still accounted for.
+    if (runTotalCostUsd > 0 || runTotalInputTokens > 0 || runTotalOutputTokens > 0) {
+      const totalTokens = runTotalInputTokens + runTotalOutputTokens
+      console.log(
+        `[COST] Run ${runId} "${item.courseInput.courseName}": $${runTotalCostUsd.toFixed(6)} ` +
+        `(${totalTokens.toLocaleString()} tokens / ${runTotalInputTokens.toLocaleString()} in, ${runTotalOutputTokens.toLocaleString()} out)`
+      )
     }
 
     return updatedItem

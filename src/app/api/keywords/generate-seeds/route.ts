@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { aiClient, AIProvider } from '@/lib/ai-client'
 import { fillPromptVariables } from '@/lib/prompts'
+import { logCostBestEffort } from '@/lib/cost-logger'
 import { SeedKeyword, ApiResponse } from '@/types'
 
 interface GenerateSeedsRequest {
@@ -9,12 +10,13 @@ interface GenerateSeedsRequest {
   courseUrl: string
   vendor?: string
   aiProvider?: AIProvider
+  runId?: string
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<SeedKeyword[]>>> {
   try {
     const body: GenerateSeedsRequest = await request.json()
-    const { prompt, courseName, courseUrl, vendor, aiProvider } = body
+    const { prompt, courseName, courseUrl, vendor, aiProvider, runId } = body
 
     console.log('[GENERATE-SEEDS] Request received')
     console.log('[GENERATE-SEEDS] Course:', courseName)
@@ -61,7 +63,19 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     const responseText = result.content
     console.log('[GENERATE-SEEDS] Response from', result.provider, '(', result.model, ')')
     console.log('[GENERATE-SEEDS] Response preview:', responseText.substring(0, 200))
-    console.log('[GENERATE-SEEDS] Tokens used:', result.tokensUsed)
+    console.log(`[GENERATE-SEEDS] Tokens: ${result.tokensUsed ?? 'N/A'} (in: ${result.inputTokens ?? 'N/A'}, out: ${result.outputTokens ?? 'N/A'}) · Cost: $${(result.costUsd ?? 0).toFixed(6)}`)
+
+    // Best-effort cost log (fire-and-forget; failure must not break the response).
+    logCostBestEffort({
+      runId,
+      courseId: courseName,
+      phase: 'seeds',
+      provider: result.provider,
+      model: result.model,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      costUsd: result.costUsd,
+    }).catch(() => {})
 
     // Parse the numbered list
     const seedKeywords: SeedKeyword[] = responseText
@@ -93,7 +107,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         console.log('[GENERATE-SEEDS] Alternative parsing found', keywords.length, 'keywords')
         return NextResponse.json({
           success: true,
-          data: keywords
+          data: keywords,
+          meta: {
+            tokensUsed: result.tokensUsed,
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+            costUsd: result.costUsd,
+            provider: result.provider,
+            model: result.model,
+          }
         })
       }
 
@@ -107,7 +129,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     console.log('[GENERATE-SEEDS] Success:', seedKeywords.map(k => k.keyword).join(', '))
     return NextResponse.json({
       success: true,
-      data: seedKeywords
+      data: seedKeywords,
+      meta: {
+        tokensUsed: result.tokensUsed,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        costUsd: result.costUsd,
+        provider: result.provider,
+        model: result.model,
+      }
     })
 
   } catch (error) {

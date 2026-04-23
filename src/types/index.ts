@@ -109,6 +109,13 @@ export interface ApiResponse<T> {
     cached?: boolean
     cacheAge?: number
     processingTimeMs?: number
+    // Admin cost tracking (populated by AI routes)
+    tokensUsed?: number
+    inputTokens?: number
+    outputTokens?: number
+    costUsd?: number
+    provider?: string
+    model?: string
   }
 }
 

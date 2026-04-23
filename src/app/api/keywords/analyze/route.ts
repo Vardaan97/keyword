@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { aiClient, AIProvider, ANALYSIS_MODEL_CHAIN } from '@/lib/ai-client'
 import { MODEL_OUTPUT_CAPS, TOKENS_PER_KEYWORD, PER_REQUEST_OVERHEAD_TOKENS } from '@/lib/model-caps'
 import { fillPromptVariables } from '@/lib/prompts'
+import { logCostBestEffort } from '@/lib/cost-logger'
 import { KeywordIdea, AnalyzedKeyword, ApiResponse } from '@/types'
 
 // Route config: allow long-running analysis and keep the handler out of static caches.
@@ -17,6 +18,7 @@ interface AnalyzeRequest {
   relatedTerms?: string
   keywords: KeywordIdea[]
   aiProvider?: AIProvider
+  runId?: string
 }
 
 interface AnalysisResponse {
@@ -185,7 +187,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
 
   try {
     const body: AnalyzeRequest = await request.json()
-    const { prompt, courseName, certificationCode, vendor, relatedTerms, keywords, aiProvider } = body
+    const { prompt, courseName, certificationCode, vendor, relatedTerms, keywords, aiProvider, runId } = body
 
     console.log('[ANALYZE] ========================================')
     console.log('[ANALYZE] Request received')
@@ -193,6 +195,13 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     console.log('[ANALYZE] Keywords count:', keywords?.length)
     console.log('[ANALYZE] AI Provider:', aiProvider || 'default')
     console.log('[ANALYZE] ========================================')
+
+    // Accumulated cost totals across all batches in this run.
+    // Populated inside processBatch; logged once after all waves complete.
+    let runTotalInputTokens = 0
+    let runTotalOutputTokens = 0
+    let runTotalCostUsd = 0
+    const costByModel: Record<string, { provider: string; inputTokens: number; outputTokens: number; costUsd: number }> = {}
 
     if (!prompt || !courseName || !keywords || keywords.length === 0) {
       console.log('[ANALYZE] Error: Missing required fields')
@@ -291,7 +300,21 @@ CRITICAL OUTPUT REQUIREMENTS:
 
           const responseText = result.content
           console.log(`[ANALYZE] ${batchLabel} Response from ${result.provider} (${result.model})`)
-          console.log(`[ANALYZE] ${batchLabel} Response: ${responseText.length} chars, ${result.tokensUsed || 'N/A'} tokens`)
+          console.log(`[ANALYZE] ${batchLabel} Response: ${responseText.length} chars, ${result.tokensUsed || 'N/A'} tokens (in: ${result.inputTokens ?? 'N/A'}, out: ${result.outputTokens ?? 'N/A'}) · Cost: $${(result.costUsd ?? 0).toFixed(6)}`)
+
+          // Accumulate cost totals for this run (closure over outer-scoped trackers).
+          if (result.inputTokens !== undefined || result.outputTokens !== undefined) {
+            runTotalInputTokens += result.inputTokens ?? 0
+            runTotalOutputTokens += result.outputTokens ?? 0
+            runTotalCostUsd += result.costUsd ?? 0
+            const key = result.model
+            if (!costByModel[key]) {
+              costByModel[key] = { provider: result.provider, inputTokens: 0, outputTokens: 0, costUsd: 0 }
+            }
+            costByModel[key].inputTokens += result.inputTokens ?? 0
+            costByModel[key].outputTokens += result.outputTokens ?? 0
+            costByModel[key].costUsd += result.costUsd ?? 0
+          }
 
           // Parse JSON response with repair fallback
           let analysisResult
@@ -490,10 +513,26 @@ CRITICAL OUTPUT REQUIREMENTS:
     }
 
     const processingTimeMs = Date.now() - startTime
+    const runTotalTokens = runTotalInputTokens + runTotalOutputTokens
     console.log('[ANALYZE] ========================================')
     console.log(`[ANALYZE] COMPLETE: ${allAnalyzedKeywords.length} keywords in ${processingTimeMs}ms`)
     console.log(`[ANALYZE] Summary: ${summary.toAdd} ADD, ${summary.toReview} REVIEW, ${summary.excluded} EXCLUDE`)
+    console.log(`[COST] Analysis run${runId ? ` ${runId}` : ''} for "${courseName}": $${runTotalCostUsd.toFixed(6)} (${runTotalTokens.toLocaleString()} tokens / ${runTotalInputTokens.toLocaleString()} in, ${runTotalOutputTokens.toLocaleString()} out)`)
     console.log('[ANALYZE] ========================================')
+
+    // Best-effort cost log to Convex (one row per model used — typically one, more if chain fallback kicked in).
+    for (const [model, agg] of Object.entries(costByModel)) {
+      logCostBestEffort({
+        runId,
+        courseId: courseName,
+        phase: 'analyze',
+        provider: agg.provider,
+        model,
+        inputTokens: agg.inputTokens,
+        outputTokens: agg.outputTokens,
+        costUsd: agg.costUsd,
+      }).catch(() => {})
+    }
 
     return NextResponse.json({
       success: true,
@@ -505,6 +544,10 @@ CRITICAL OUTPUT REQUIREMENTS:
         processingTimeMs,
         batchCount: batches.length,
         keywordsPerBatch: MAX_KEYWORDS_PER_BATCH,
+        tokensUsed: runTotalTokens || undefined,
+        inputTokens: runTotalInputTokens || undefined,
+        outputTokens: runTotalOutputTokens || undefined,
+        costUsd: runTotalCostUsd || undefined,
         ...(warnings.length > 0 ? { warnings } : {}),
       }
     })

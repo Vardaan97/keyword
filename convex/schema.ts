@@ -1073,6 +1073,28 @@ export default defineSchema({
   // URL → AD GROUP MAPPINGS (for Google Ads Editor export)
   // ============================================
 
+  // ============================================
+  // ADMIN COST TRACKING (internal — not shown to team users)
+  // ============================================
+
+  // Per-AI-call cost ledger for daily admin review.
+  // Written by generate-seeds and analyze routes; queried via `npx convex run runCosts:getRunCosts`.
+  run_costs: defineTable({
+    runId: v.string(),               // Groups all calls within one course/batch run
+    courseId: v.optional(v.string()),// Course name or batch item id (free-form)
+    phase: v.union(v.literal("seeds"), v.literal("analyze"), v.literal("other")),
+    provider: v.string(),            // 'openai' | 'openrouter'
+    model: v.string(),               // Full model id (e.g., 'google/gemini-3.1-flash-lite-preview')
+    inputTokens: v.number(),
+    outputTokens: v.number(),
+    costUsd: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_runId", ["runId"])
+    .index("by_phase_createdAt", ["phase", "createdAt"])
+    .index("by_model_createdAt", ["model", "createdAt"]),
+
   // Maps course URLs to their Campaign/Ad Group in Google Ads
   // Populated from Google Ads Ad Report CSV exports
   // Used to generate Google Ads Editor compatible keyword exports
