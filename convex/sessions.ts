@@ -829,3 +829,83 @@ export const findMatchingSession = query({
     return null;
   },
 });
+
+/**
+ * Find the most-recent matching session by URL only (no seed keywords required).
+ *
+ * Used as Step 0 probe BEFORE seed generation — if the same URL was processed
+ * within the TTL window with the same prompt versions and geo target, we can
+ * skip seed generation + fetch-ideas + analyze entirely.
+ *
+ * Match key: courseUrl + geoTarget + seedPromptVersion + analysisPromptVersion + TTL (7 days).
+ * Returns the most-recent completed session within TTL, or null.
+ */
+const URL_PROBE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+export const findMatchingSessionByUrl = query({
+  args: {
+    courseUrl: v.string(),
+    geoTarget: v.string(),
+    seedPromptVersion: v.number(),
+    analysisPromptVersion: v.number(),
+  },
+  handler: async (ctx, args) => {
+    if (!args.courseUrl) return null;
+
+    const cutoff = Date.now() - URL_PROBE_TTL_MS;
+
+    const sessions = await ctx.db
+      .query("researchSessions")
+      .withIndex("by_url_geo", (q) =>
+        q.eq("courseUrl", args.courseUrl).eq("geoTarget", args.geoTarget)
+      )
+      .collect();
+
+    // Filter: completed + matching prompt versions + within TTL
+    const candidates = sessions.filter(
+      (s) =>
+        s.status === "completed" &&
+        s.seedPromptVersion === args.seedPromptVersion &&
+        s.analysisPromptVersion === args.analysisPromptVersion &&
+        (s.updatedAt ?? s.createdAt) > cutoff
+    );
+
+    if (candidates.length === 0) return null;
+
+    // Pick most recent (prefer updatedAt, fall back to createdAt)
+    candidates.sort(
+      (a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt)
+    );
+    const session = candidates[0];
+
+    // Completeness check: must have keywords saved (either inline or externally)
+    const hasInlineKeywords =
+      (session.keywordIdeas && session.keywordIdeas.length > 0) ||
+      (session.analyzedKeywords && session.analyzedKeywords.length > 0);
+    if (!session.keywordsStoredExternally && !hasInlineKeywords) {
+      return null; // skip probe hit; session has no actual data
+    }
+
+    // Return metadata only - caller uses getSessionAllKeywords for full data.
+    return {
+      _id: session._id,
+      courseName: session.courseName,
+      courseUrl: session.courseUrl,
+      vendor: session.vendor,
+      certificationCode: session.certificationCode,
+      seedKeywords: session.seedKeywords,
+      keywordsCount: session.keywordsCount,
+      analyzedCount: session.analyzedCount,
+      toAddCount: session.toAddCount,
+      urgentCount: session.urgentCount,
+      highPriorityCount: session.highPriorityCount,
+      geoTarget: session.geoTarget,
+      dataSource: session.dataSource,
+      seedPromptVersion: session.seedPromptVersion,
+      analysisPromptVersion: session.analysisPromptVersion,
+      keywordsStoredExternally: session.keywordsStoredExternally,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+    };
+  },
+});

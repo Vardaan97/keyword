@@ -1056,6 +1056,85 @@ export default function Home() {
     }
   }
 
+  /**
+   * Step 0 probe — URL-only cache check BEFORE seed generation.
+   *
+   * If the same URL was processed within the 7-day TTL with identical prompt
+   * versions and geoTarget, returns the cached session so the caller can skip
+   * seed generation + fetch-ideas + analyze entirely. On any error, returns
+   * { match: false } so the caller falls through to the full flow.
+   */
+  const checkUrlOnlyCache = async (
+    courseUrl: string,
+    signal: AbortSignal,
+  ): Promise<{
+    match: boolean
+    sessionData?: {
+      courseName: string
+      createdAt: number
+      keywordsCount: number
+      analyzedCount: number
+      toAddCount: number
+      urgentCount: number
+      geoTarget: string
+      keywordIdeas: KeywordIdea[]
+      analyzedKeywords: AnalyzedKeyword[]
+      seedKeywords: string[]
+    }
+  }> => {
+    // Skip if no URL (some CSV rows may be missing it)
+    if (!courseUrl) return { match: false }
+    // Skip if prompt versions haven't loaded yet (server will reject with 400 anyway)
+    if (seedVersion === 0 || analysisVersion === 0) return { match: false }
+
+    try {
+      const response = await fetch('/api/sessions/find-match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          courseUrl,
+          // seedKeywords OMITTED — route uses URL-only findMatchingSessionByUrl query
+          geoTarget: targetCountry,
+          seedPromptVersion: seedVersion,
+          analysisPromptVersion: analysisVersion,
+        }),
+        signal,
+      })
+
+      if (!response.ok) {
+        // Don't log noisy warnings on abort; just bail
+        if (signal.aborted) return { match: false }
+        console.log('[STEP 0] URL-probe failed:', response.statusText)
+        return { match: false }
+      }
+
+      const result = await response.json()
+      if (result.match && result.cacheHit) {
+        console.log(`[STEP 0] URL cache HIT for "${result.match.courseName}" — skipping seeds/fetch/analyze`)
+        return {
+          match: true,
+          sessionData: {
+            courseName: result.match.courseName,
+            createdAt: result.match.createdAt,
+            keywordsCount: result.match.keywordsCount,
+            analyzedCount: result.match.analyzedCount,
+            toAddCount: result.match.toAddCount,
+            urgentCount: result.match.urgentCount,
+            geoTarget: result.match.geoTarget,
+            keywordIdeas: result.match.keywordIdeas || [],
+            analyzedKeywords: result.match.analyzedKeywords || [],
+            seedKeywords: result.match.seedKeywords || [],
+          },
+        }
+      }
+      return { match: false }
+    } catch (err) {
+      if (signal.aborted) return { match: false }
+      console.log('[STEP 0] URL-probe error:', err)
+      return { match: false }
+    }
+  }
+
   // Show pre-flight modal before starting batch processing
   const showPreflightAndStart = () => {
     const pendingItems = batchItems.filter(item => item.status === 'pending')
@@ -1244,6 +1323,33 @@ export default function Home() {
 
     try {
       if (signal.aborted) throw new Error('Processing stopped by user')
+
+      // ========== STEP 0: URL-only cache probe (BEFORE seed generation) ==========
+      // If this exact URL + geo + prompt versions was processed within the last 7 days,
+      // skip seeds/fetch/analyze entirely — saves ~1 AI call + 2-5s wall time per cached course.
+      const urlProbe = await checkUrlOnlyCache(item.courseInput.courseUrl, signal)
+      if (urlProbe.match && urlProbe.sessionData) {
+        updateProgress('generate_seeds', 'completed', 'Skipped (URL cache hit)')
+        updateProgress('check_cache', 'completed', 'URL-only probe hit!', 2)
+        updateProgress('fetch_keywords', 'completed', `${urlProbe.sessionData.keywordsCount} keywords from cache`)
+        updateProgress('save_cache', 'completed', 'Skipped (using cached session)')
+        updateProgress('analyze', 'completed', `${urlProbe.sessionData.analyzedCount} keywords analyzed (cached)`)
+        updateProgress('complete', 'completed', 'Completed from URL cache!')
+
+        const processingTime = Date.now() - startTime
+        return {
+          ...updatedItem,
+          seedKeywords: urlProbe.sessionData.seedKeywords.map(kw => ({ keyword: kw, source: 'ai_generated' as const })),
+          keywordIdeas: urlProbe.sessionData.keywordIdeas,
+          analyzedKeywords: urlProbe.sessionData.analyzedKeywords,
+          status: 'completed' as BatchItemStatus,
+          cacheHit: true,
+          dataSource: 'smart_cache',
+          endTime: Date.now(),
+          processingTimeMs: processingTime,
+          progress,
+        }
+      }
 
       // ========== STEP 1: Generate Seeds (runs immediately) ==========
       updateProgress('generate_seeds', 'in_progress', 'Calling AI for seeds...', 1)

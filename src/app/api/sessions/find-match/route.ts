@@ -26,6 +26,19 @@ const sessionsApi = anyApi.sessions as unknown as {
     },
     unknown
   >
+  // URL-only probe: called from the Step 0 pre-seed cache check. Matches on URL +
+  // geoTarget + prompt versions, within 7-day TTL. Returns most recent completed session.
+  findMatchingSessionByUrl: FunctionReference<
+    "query",
+    "public",
+    {
+      courseUrl: string
+      geoTarget: string
+      seedPromptVersion: number
+      analysisPromptVersion: number
+    },
+    unknown
+  >
   getSessionAllKeywords: FunctionReference<
     "query",
     "public",
@@ -51,10 +64,12 @@ export async function POST(request: NextRequest) {
       analysisPromptVersion,
     } = body
 
-    // Validate required fields
-    if (!courseUrl || !seedKeywords || !geoTarget) {
+    // Validate required fields. seedKeywords is OPTIONAL: when omitted/empty,
+    // we use the URL-only probe (Step 0 pre-seed check). When present, we use
+    // the classic URL+seeds match (Step 2 post-seed check).
+    if (!courseUrl || !geoTarget) {
       return NextResponse.json(
-        { error: "Missing required fields: courseUrl, seedKeywords, geoTarget" },
+        { error: "Missing required fields: courseUrl, geoTarget" },
         { status: 400 }
       )
     }
@@ -65,6 +80,8 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       )
     }
+
+    const urlOnlyMode = !Array.isArray(seedKeywords) || seedKeywords.length === 0
 
     const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL
     if (!convexUrl) {
@@ -77,18 +94,26 @@ export async function POST(request: NextRequest) {
 
     const client = new ConvexHttpClient(convexUrl)
 
-    // Check for matching session
-    const matchingSession = await client.query(sessionsApi.findMatchingSession, {
-      courseUrl,
-      seedKeywords,
-      geoTarget,
-      seedPromptVersion,
-      analysisPromptVersion,
-    })
+    // Dispatch to URL-only (Step 0) or URL+seeds (Step 2) query based on whether seeds were provided.
+    const matchingSession = urlOnlyMode
+      ? await client.query(sessionsApi.findMatchingSessionByUrl, {
+          courseUrl,
+          geoTarget,
+          seedPromptVersion,
+          analysisPromptVersion,
+        })
+      : await client.query(sessionsApi.findMatchingSession, {
+          courseUrl,
+          seedKeywords,
+          geoTarget,
+          seedPromptVersion,
+          analysisPromptVersion,
+        })
 
     if (matchingSession) {
       // Found a match!
       const session = matchingSession as MatchingSession
+      const matchType = urlOnlyMode ? "url" : "url+seeds"
 
       // If keywords are stored externally, fetch them
       if (session.keywordsStoredExternally) {
@@ -103,14 +128,20 @@ export async function POST(request: NextRequest) {
             analyzedKeywords: keywordsData.analyzedKeywords,
           },
           cacheHit: true,
-          message: "Found existing session with same URL, seeds, and prompt versions",
+          matchType,
+          message: urlOnlyMode
+            ? "Found existing session with same URL + prompt versions (URL-only probe)"
+            : "Found existing session with same URL, seeds, and prompt versions",
         })
       }
 
       return NextResponse.json({
         match: matchingSession,
         cacheHit: true,
-        message: "Found existing session with same URL, seeds, and prompt versions",
+        matchType,
+        message: urlOnlyMode
+          ? "Found existing session with same URL + prompt versions (URL-only probe)"
+          : "Found existing session with same URL, seeds, and prompt versions",
       })
     }
 
@@ -118,6 +149,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       match: null,
       cacheHit: false,
+      matchType: urlOnlyMode ? "url" : "url+seeds",
       message: "No matching session found - proceed with processing",
     })
   } catch (error) {
