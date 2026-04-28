@@ -401,8 +401,26 @@ export async function getTokenStatus(): Promise<{
   updatedAt?: string
   updatedBy?: string
 }> {
-  const storedTokens = await getStoredTokens()
+  // Check the in-memory cache first (same instance, fastest path)
+  if (tokenCache?.refreshToken) {
+    return {
+      hasToken: true,
+      source: 'runtime',
+      updatedAt: tokenCache.updatedAt,
+      updatedBy: tokenCache.updatedBy,
+    }
+  }
 
+  // Check Convex (typed source of truth across Vercel serverless instances)
+  const convexToken = await getTokenFromConvex()
+  if (convexToken) {
+    return {
+      hasToken: true,
+      source: 'runtime',
+    }
+  }
+
+  const storedTokens = await getStoredTokens()
   if (storedTokens?.refreshToken) {
     return {
       hasToken: true,
@@ -412,7 +430,7 @@ export async function getTokenStatus(): Promise<{
     }
   }
 
-  // Check Supabase
+  // Check Supabase (legacy fallback)
   const supabaseToken = await getTokenFromSupabase()
   if (supabaseToken) {
     return {
