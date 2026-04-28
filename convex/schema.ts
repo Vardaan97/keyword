@@ -1074,6 +1074,34 @@ export default defineSchema({
   // ============================================
 
   // ============================================
+  // GOOGLE ADS OAUTH TOKEN (typed replacement for the keyword_cache hack)
+  // ============================================
+
+  // Single shared admin OAuth refresh token used by all server-side Google Ads API calls.
+  // tokenId is always 'shared-admin' for this single-token architecture.
+  // The previous implementation reused the keyword_cache table with a magic key
+  // ('__system__oauth_refresh_token') which silently broke if the table schema drifted.
+  googleAdsOAuthToken: defineTable({
+    tokenId: v.string(),                // 'shared-admin'
+    refreshToken: v.string(),
+    userEmail: v.optional(v.string()),  // Email of user who authorized
+    updatedAt: v.number(),
+  })
+    .index("by_tokenId", ["tokenId"]),
+
+  // Audit log of refresh-token rotations captured from Google's /token endpoint.
+  // Helps confirm Track 2 fix is working in production by recording every time
+  // Google returned a new refresh_token from the access-token exchange.
+  googleAdsOAuthRotations: defineTable({
+    tokenId: v.string(),                // 'shared-admin'
+    oldRefreshTokenSuffix: v.string(),  // Last 8 chars of old token (full token never logged)
+    newRefreshTokenSuffix: v.string(),  // Last 8 chars of new token
+    rotatedAt: v.number(),
+  })
+    .index("by_rotatedAt", ["rotatedAt"])
+    .index("by_tokenId_rotatedAt", ["tokenId", "rotatedAt"]),
+
+  // ============================================
   // ADMIN COST TRACKING (internal — not shown to team users)
   // ============================================
 

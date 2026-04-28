@@ -6,14 +6,17 @@
  *
  * Priority order for refresh token:
  * 1. In-memory cache (fastest, same serverless instance)
- * 2. Supabase (persistent across Vercel serverless instances)
- * 3. Runtime file (local dev only — ephemeral on Vercel)
- * 4. Environment variable (fallback)
+ * 2. Convex googleAdsOAuthToken (typed table, source of truth across Vercel instances)
+ * 3. Supabase keyword_cache (legacy fallback — kept until Convex is universally deployed)
+ * 4. Runtime file (local dev only — ephemeral on Vercel)
+ * 5. Environment variable (fallback for first-time bootstrap; deploy-time snapshot only)
  */
 
 import { promises as fs } from 'fs'
 import path from 'path'
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
+import { ConvexHttpClient } from 'convex/browser'
+import { FunctionReference, anyApi } from 'convex/server'
 
 // Re-export TokenExpiredError from the standalone errors module
 // (kept separate so it can be imported in client bundles without pulling in 'fs')
@@ -22,8 +25,73 @@ export { TokenExpiredError } from './errors'
 // Token storage file path - stored in project root
 const TOKEN_FILE_PATH = path.join(process.cwd(), '.google-ads-tokens.json')
 
-// Supabase key for storing the OAuth token (uses keyword_cache table)
+// Supabase key for storing the OAuth token (legacy — uses keyword_cache table)
 const SUPABASE_TOKEN_KEY = '__system__oauth_refresh_token'
+
+// Convex API surface (typed shim — avoids generated-types dependency)
+const oauthTokenApi = anyApi.googleAdsOAuthToken as unknown as {
+  setSharedToken: FunctionReference<
+    'mutation',
+    'public',
+    { refreshToken: string; userEmail?: string },
+    { ok: boolean; rotated: boolean }
+  >
+  getSharedToken: FunctionReference<
+    'query',
+    'public',
+    Record<string, never>,
+    { refreshToken: string; userEmail?: string; updatedAt: number } | null
+  >
+}
+
+/**
+ * Save token to Convex googleAdsOAuthToken table.
+ * Returns true on success, false if Convex unavailable (caller falls back to Supabase).
+ */
+async function saveTokenToConvex(refreshToken: string, userEmail?: string): Promise<boolean> {
+  const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL
+  if (!convexUrl) return false
+  try {
+    const client = new ConvexHttpClient(convexUrl)
+    const result = await client.mutation(oauthTokenApi.setSharedToken, {
+      refreshToken,
+      userEmail,
+    })
+    if (result.rotated) {
+      console.log('[TOKEN-STORAGE] Convex: token ROTATED (new value persisted)')
+    } else {
+      console.log('[TOKEN-STORAGE] Convex: token saved')
+    }
+    return true
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn('[TOKEN-STORAGE] Convex save failed, will try Supabase fallback:', msg)
+    return false
+  }
+}
+
+/**
+ * Read token from Convex googleAdsOAuthToken table.
+ * Returns null if Convex isn't configured or table is empty.
+ */
+async function getTokenFromConvex(): Promise<string | null> {
+  const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL
+  if (!convexUrl) return null
+  try {
+    const client = new ConvexHttpClient(convexUrl)
+    const result = await client.query(oauthTokenApi.getSharedToken, {})
+    if (!result?.refreshToken) {
+      console.log('[TOKEN-STORAGE] Convex: no token row yet (empty table)')
+      return null
+    }
+    console.log('[TOKEN-STORAGE] Using refresh token from Convex')
+    return result.refreshToken
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn('[TOKEN-STORAGE] Convex read failed, will try Supabase fallback:', msg)
+    return null
+  }
+}
 
 /**
  * Get a Supabase client with service role key (bypasses RLS)
@@ -144,15 +212,23 @@ export async function getRefreshToken(): Promise<string> {
     return tokenCache.refreshToken
   }
 
-  // 2. Try Supabase FIRST (persistent across Vercel serverless instances — most reliable)
+  // 2. Try Convex FIRST — typed source of truth, persistent across Vercel instances
+  const convexToken = await getTokenFromConvex()
+  if (convexToken) {
+    tokenCache = { refreshToken: convexToken, updatedAt: new Date().toISOString() }
+    return convexToken
+  }
+
+  // 3. Try Supabase as legacy fallback (in case Convex isn't deployed yet)
   const supabaseToken = await getTokenFromSupabase()
   if (supabaseToken) {
-    // Cache in memory for subsequent calls in this instance
+    // Migration assist: shadow-write to Convex so future reads land there.
+    saveTokenToConvex(supabaseToken).catch(() => {})
     tokenCache = { refreshToken: supabaseToken, updatedAt: new Date().toISOString() }
     return supabaseToken
   }
 
-  // 3. Try runtime file storage (works locally, not on Vercel)
+  // 4. Try runtime file storage (works locally, not on Vercel)
   const storedTokens = await getStoredTokens()
   if (storedTokens?.refreshToken) {
     console.log('[TOKEN-STORAGE] Using refresh token from runtime file')
@@ -160,14 +236,14 @@ export async function getRefreshToken(): Promise<string> {
     return storedTokens.refreshToken
   }
 
-  // 4. Fall back to environment variable (may be stale on Vercel after re-auth)
+  // 5. Fall back to environment variable (may be stale on Vercel after re-auth)
   const envToken = process.env.GOOGLE_ADS_REFRESH_TOKEN
   if (envToken) {
-    console.log('[TOKEN-STORAGE] Using refresh token from environment variable (may be stale)')
+    console.log('[TOKEN-STORAGE] Using refresh token from environment variable (BOOTSTRAP ONLY — may be stale on Vercel)')
     return envToken
   }
 
-  throw new Error('No refresh token available. Please authorize at /settings/google-ads')
+  throw new Error('No refresh token available. Please authorize at /api/auth/google-ads')
 }
 
 /**
@@ -218,8 +294,17 @@ export async function saveTokens(tokens: {
     console.log('[TOKEN-STORAGE] File save skipped (read-only filesystem, expected on Vercel)')
   }
 
-  // Save to Supabase (persists across Vercel serverless instances)
-  await saveTokenToSupabase(tokens.refreshToken, tokens.userEmail)
+  // Persist across Vercel serverless instances. Try Convex first (typed source of truth),
+  // fall back to Supabase if Convex isn't configured.
+  const persistedToConvex = await saveTokenToConvex(tokens.refreshToken, tokens.userEmail)
+  if (!persistedToConvex) {
+    console.log('[TOKEN-STORAGE] Convex unavailable — using Supabase fallback')
+    await saveTokenToSupabase(tokens.refreshToken, tokens.userEmail)
+  } else {
+    // Also shadow-write to Supabase so existing instances reading the legacy path stay current.
+    // Best-effort; failure here is non-fatal because Convex is the source of truth.
+    saveTokenToSupabase(tokens.refreshToken, tokens.userEmail).catch(() => {})
+  }
 
   console.log('[TOKEN-STORAGE] Tokens saved successfully')
 }

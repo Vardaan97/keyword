@@ -1370,6 +1370,30 @@ async function getAccessToken(config: GoogleAdsConfig): Promise<string> {
 
   console.log('[GOOGLE-ADS] Token expires in:', data.expires_in, 'seconds')
 
+  // ROTATION CAPTURE (Track 2 fix):
+  // Google's /token endpoint can return a rotated `refresh_token` on access-token
+  // exchange when anti-abuse heuristics fire (common for sensitive scopes in Testing
+  // mode, parallel use across Vercel instances, etc.). The previous implementation
+  // discarded this rotated value, so the OLD token in Convex/Supabase/env became
+  // invalid silently and every subsequent call would fail until manual re-auth.
+  // Capture and persist the rotation here so all serverless instances pick up the
+  // new value on their next read.
+  if (data.refresh_token && data.refresh_token !== config.refreshToken) {
+    console.log('[GOOGLE-ADS] Refresh token ROTATED by Google — persisting new value via token-storage')
+    try {
+      // Lazy-import to avoid pulling 'fs' and Convex client into client bundles.
+      const { saveTokens } = await import('./token-storage')
+      await saveTokens({
+        refreshToken: data.refresh_token,
+        accessToken: data.access_token,
+        expiresIn: data.expires_in
+      })
+    } catch (rotErr) {
+      const msg = rotErr instanceof Error ? rotErr.message : String(rotErr)
+      console.error('[GOOGLE-ADS] Failed to persist rotated refresh token (next call may fail):', msg)
+    }
+  }
+
   // Cache the token
   cachedAccessToken = {
     token: data.access_token,
