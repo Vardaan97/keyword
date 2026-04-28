@@ -1378,16 +1378,34 @@ async function getAccessToken(config: GoogleAdsConfig): Promise<string> {
   // invalid silently and every subsequent call would fail until manual re-auth.
   // Capture and persist the rotation here so all serverless instances pick up the
   // new value on their next read.
+  //
+  // Implementation note: we fetch() an internal route instead of a direct dynamic
+  // import. google-ads.ts is in the client bundle (store.ts imports it for
+  // GOOGLE_ADS_ACCOUNTS), and a `await import('./token-storage')` here would force
+  // Turbopack to bundle 'fs' from token-storage.ts into the browser, which fails.
+  // The fetch() avoids that entirely — only the route handler imports the heavy
+  // server-only module.
   if (data.refresh_token && data.refresh_token !== config.refreshToken) {
-    console.log('[GOOGLE-ADS] Refresh token ROTATED by Google — persisting new value via token-storage')
+    console.log('[GOOGLE-ADS] Refresh token ROTATED by Google — persisting via /api/auth/google-ads/persist-rotation')
     try {
-      // Lazy-import to avoid pulling 'fs' and Convex client into client bundles.
-      const { saveTokens } = await import('./token-storage')
-      await saveTokens({
-        refreshToken: data.refresh_token,
-        accessToken: data.access_token,
-        expiresIn: data.expires_in
+      // Construct an absolute URL because fetch on the server-side requires it.
+      // Order: explicit override → Vercel-provided URL → localhost dev fallback.
+      const baseUrl =
+        process.env.NEXT_PUBLIC_APP_URL ||
+        (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3005')
+      const persistUrl = `${baseUrl}/api/auth/google-ads/persist-rotation`
+      const persistRes = await fetch(persistUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          refreshToken: data.refresh_token,
+          accessToken: data.access_token,
+          expiresIn: data.expires_in,
+        }),
       })
+      if (!persistRes.ok) {
+        console.error(`[GOOGLE-ADS] persist-rotation responded ${persistRes.status} — next call may use stale token`)
+      }
     } catch (rotErr) {
       const msg = rotErr instanceof Error ? rotErr.message : String(rotErr)
       console.error('[GOOGLE-ADS] Failed to persist rotated refresh token (next call may fail):', msg)
